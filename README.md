@@ -116,7 +116,7 @@ Add `--volumes` to delete those volumes.
 
 ```toml
 program_id = "<PROGRAM_ID>"
-idl_path = "idl/program.json"
+idl_path = "idl/idl1.json"
 
 [multisig] # optional; all three values are required when present
 vault_address = "<SQUADS_DEFAULT_VAULT>"
@@ -420,12 +420,25 @@ Terraform configurations are available for
 [`AWS`](infra/aws) and [`Google Cloud`](infra/gcp):
 
 ```sh
-cd infra/aws # or infra/gcp
+cd infra/aws
 cp terraform.tfvars.example terraform.tfvars
 terraform init
 terraform plan
 terraform apply
 ```
+
+The Google Cloud module keeps state in a bucket, so its `init` needs one:
+
+```sh
+cd infra/gcp
+cp terraform.tfvars.example terraform.tfvars
+terraform init -backend-config="bucket=<state-bucket>" -backend-config="prefix=gcp/<deployment>"
+terraform plan
+terraform apply
+```
+
+See [remote state](infra/README.md#remote-state) for creating that bucket and
+for running several deployments from one module directory.
 
 Each deployment creates a dedicated network, an SSH-only Ubuntu VM, a private
 versioned deployment bucket, a cloud secret, and a least-privilege workload
