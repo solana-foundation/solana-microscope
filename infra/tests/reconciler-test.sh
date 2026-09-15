@@ -35,6 +35,8 @@ mkdir -p "$BIN_DIR" "$BUCKET_DIR/config" "$BUCKET_DIR/idl" "$SOURCE_REPOSITORY"
 git -C "$SOURCE_REPOSITORY" init --quiet --initial-branch=main
 git -C "$SOURCE_REPOSITORY" config user.email test@example.com
 git -C "$SOURCE_REPOSITORY" config user.name Test
+git -C "$SOURCE_REPOSITORY" config commit.gpgsign false
+git -C "$SOURCE_REPOSITORY" config tag.gpgsign false
 printf 'services: {}\n' >"$SOURCE_REPOSITORY/docker-compose.yml"
 git -C "$SOURCE_REPOSITORY" add docker-compose.yml
 git -C "$SOURCE_REPOSITORY" commit --quiet --message initial
@@ -44,6 +46,8 @@ mkdir -p "$OTHER_REPOSITORY"
 git -C "$OTHER_REPOSITORY" init --quiet --initial-branch=main
 git -C "$OTHER_REPOSITORY" config user.email test@example.com
 git -C "$OTHER_REPOSITORY" config user.name Test
+git -C "$OTHER_REPOSITORY" config commit.gpgsign false
+git -C "$OTHER_REPOSITORY" config tag.gpgsign false
 printf 'services: {}\n' >"$OTHER_REPOSITORY/docker-compose.yml"
 printf 'other\n' >"$OTHER_REPOSITORY/marker"
 git -C "$OTHER_REPOSITORY" add docker-compose.yml marker
