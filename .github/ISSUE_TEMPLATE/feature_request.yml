@@ -1,0 +1,39 @@
+name: Feature request
+description: Propose an improvement to Solana Microscope
+title: 'feat: '
+labels: ['enhancement']
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What monitoring or deployment problem should this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe the desired behavior and configuration.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives
+      description: What alternatives or workarounds have you considered?
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Decoding and indexing
+        - Squads monitoring
+        - Metrics and dashboards
+        - Alerting and notifications
+        - AWS infrastructure
+        - Google Cloud infrastructure
+        - Developer experience
+        - Other
+    validations:
+      required: true

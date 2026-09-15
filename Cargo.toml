@@ -1,0 +1,19 @@
+[workspace]
+resolver = "2"
+# Decoder crates are generated, not members: each has its own [workspace],
+# which keeps fmt/clippy off generated code.
+members = ["crates/microscope-indexer"]
+exclude = [
+    "crates/program-decoder",
+    "crates/squads-v3-decoder",
+    "crates/squads-v4-decoder",
+    "crates/squads-smart-account-decoder",
+]
+
+[profile.dev]
+debug = "line-tables-only"
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/solana-foundation/solana-microscope"

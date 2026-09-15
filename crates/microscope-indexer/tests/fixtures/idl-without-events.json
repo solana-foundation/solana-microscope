@@ -1,0 +1,46 @@
+{
+  "kind": "rootNode",
+  "standard": "codama",
+  "version": "1.0.0",
+  "program": {
+    "kind": "programNode",
+    "name": "program",
+    "publicKey": "11111111111111111111111111111111",
+    "version": "0.1.0",
+    "origin": "shank",
+    "docs": [],
+    "instructions": [
+      {
+        "kind": "instructionNode",
+        "name": "initialize",
+        "docs": [],
+        "optionalAccountStrategy": "programId",
+        "accounts": [
+          {
+            "kind": "instructionAccountNode",
+            "name": "authority",
+            "docs": [],
+            "isWritable": true,
+            "isSigner": true,
+            "isOptional": false
+          }
+        ],
+        "arguments": [
+          {
+            "kind": "instructionArgumentNode",
+            "name": "discriminator",
+            "docs": [],
+            "type": { "kind": "numberTypeNode", "format": "u8", "endian": "le" },
+            "defaultValue": { "kind": "numberValueNode", "number": 0 },
+            "defaultValueStrategy": "omitted"
+          }
+        ]
+      }
+    ],
+    "accounts": [],
+    "definedTypes": [],
+    "errors": [],
+    "pdas": []
+  },
+  "additionalPrograms": []
+}

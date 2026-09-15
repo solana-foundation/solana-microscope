@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+
+echo "Running format check..."
+just fmt-check
+
+echo "Running lint check..."
+just lint-check

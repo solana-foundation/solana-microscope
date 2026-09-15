@@ -1,0 +1,72 @@
+# Copy to microscope.toml and edit for your deployment (`just setup` seeds it).
+# One deployment monitors one program; the values below are the test deployment.
+program_id = "De1egAFMkMWZSN5rYXRj9CAdheBamobVNubTsi9avR44"
+idl_path = "idl/idl1.json"
+# Optional. Configure the Squads default vault, internal state account, and
+# generation. Omit this section to monitor the program only.
+# [multisig]
+# vault_address = "replace-with-the-vault-shown-in-the-squads-ui"
+# state_address = "replace-with-its-internal-state-account"
+# version = "v4"
+
+# Optional. Yellowstone is the default when this section is omitted. A configured
+# RPC_URL adds gap recovery; set mode to "rpc" to use polling as the primary source.
+# [datasource]
+# mode = "rpc"
+# poll_interval_seconds = 5
+# replay_window_slots = 300
+
+# Optional: override the built-in event and multisig table columns with JSON paths.
+# Missing paths are empty cells; raw JSON remains available in Loki.
+# [dashboard]
+# event_fields = ["name", "data.amount"]
+# multisig_fields = ["action", "squads_version", "data.data.args.new_member.key", "failed"]
+
+# Defaults used by every alert unless that alert overrides them.
+# Evaluation intervals must be multiples of Grafana's 10-second scheduler interval.
+[alerting]
+lookback_window_seconds = 60
+evaluation_interval_seconds = 10
+# Notifications link the matched transaction here. Append ?cluster=devnet for
+# devnet deployments, or point it at another explorer.
+explorer_transaction_url = "https://explorer.solana.com/tx/{signature}"
+
+# Alert on a decoded program event. Leave channels empty to evaluate the rule
+# without delivering notifications, which is useful for local testing.
+[[alerts]]
+kind = "event"
+name = "recurring_transfer_event"
+match = "all"
+conditions = [
+  { field = "data.amount", operator = "gt", value = 0 },
+  { field = "failed", operator = "eq", value = false },
+]
+severity = "warning"
+channels = []
+# Optional per-alert overrides:
+# lookback_window_seconds = 300
+# evaluation_interval_seconds = 30
+
+# Other supported signals:
+# [[alerts]]
+# kind = "instruction"
+# name = "subscribe"
+# severity = "critical"
+# channels = ["slack", "pagerduty"]
+#
+# [[alerts]]
+# kind = "multisig"
+# name = "proposal_approved"
+# severity = "info"
+# channels = ["telegram"]
+#
+# Multisig alerts already match successful activity only; a `failed` condition
+# on a multisig alert is rejected at startup.
+#
+# Set credentials for every selected channel in .env. Match can be "all" or
+# "any". Operators: exists, contains, eq, ne, gt, gte, lt, and lte. Omit
+# value only for exists, which matches non-empty values: a missing field,
+# null, and "" do not match. `ne` against a string or boolean also requires
+# the field to be present. `contains` requires a non-empty string value.
+# Integer values above 2^53 are rejected because Loki compares numbers as
+# float64; quote the value to compare it as an exact string.

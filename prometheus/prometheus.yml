@@ -1,0 +1,11 @@
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: microscope-indexer
+    static_configs:
+      - targets: ["indexer:9090"]
+
+  - job_name: alloy
+    static_configs:
+      - targets: ["alloy:12345"]

@@ -1,0 +1,39 @@
+name: Infrastructure
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 1
+
+      - uses: ./.github/actions/setup
+        with:
+          install-rust: 'false'
+          enable-rust-cache: 'false'
+          install-node: 'false'
+          install-python: 'false'
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4
+
+      - name: Initialize providers
+        run: |
+          terraform -chdir=infra/aws init -backend=false
+          terraform -chdir=infra/gcp init -backend=false
+
+      - name: Validate infrastructure
+        run: just infra-check

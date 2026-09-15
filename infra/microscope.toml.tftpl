@@ -1,0 +1,48 @@
+program_id = ${jsonencode(program_id)}
+idl_path = "idl/program.json"
+%{ if multisig != null ~}
+
+[multisig]
+vault_address = ${jsonencode(multisig.vault_address)}
+state_address = ${jsonencode(multisig.state_address)}
+version = ${jsonencode(multisig.version)}
+%{ endif ~}
+
+[datasource]
+mode = ${jsonencode(datasource.mode)}
+poll_interval_seconds = ${datasource.poll_interval_seconds}
+replay_window_slots = ${datasource.replay_window_slots}
+
+%{ if dashboard.event_fields != null || dashboard.multisig_fields != null ~}
+[dashboard]
+%{ if dashboard.event_fields != null ~}
+event_fields = ${jsonencode(dashboard.event_fields)}
+%{ endif ~}
+%{ if dashboard.multisig_fields != null ~}
+multisig_fields = ${jsonencode(dashboard.multisig_fields)}
+%{ endif ~}
+%{ endif ~}
+
+[alerting]
+lookback_window_seconds = ${alerting.lookback_window_seconds}
+evaluation_interval_seconds = ${alerting.evaluation_interval_seconds}
+%{ for alert in alerts ~}
+
+[[alerts]]
+kind = ${jsonencode(alert.kind)}
+name = ${jsonencode(alert.name)}
+match = ${jsonencode(alert.match)}
+conditions = [
+%{ for condition in alert.conditions ~}
+  { field = ${jsonencode(condition.field)}, operator = ${jsonencode(condition.operator)}%{ if try(condition.value, null) != null ~}, value = ${jsonencode(condition.value)}%{ endif } },
+%{ endfor ~}
+]
+severity = ${jsonencode(alert.severity)}
+channels = ${jsonencode(sort(tolist(alert.channels)))}
+%{ if alert.lookback_window_seconds != null ~}
+lookback_window_seconds = ${alert.lookback_window_seconds}
+%{ endif ~}
+%{ if alert.evaluation_interval_seconds != null ~}
+evaluation_interval_seconds = ${alert.evaluation_interval_seconds}
+%{ endif ~}
+%{ endfor ~}

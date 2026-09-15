@@ -1,0 +1,82 @@
+region     = "us-east-2"
+program_id = "De1egAFMkMWZSN5rYXRj9CAdheBamobVNubTsi9avR44"
+# Optional; add it to also track a Squads-controlled account.
+# multisig = {
+#   vault_address = "replace-with-the-vault-shown-in-the-squads-ui"
+#   state_address = "replace-with-its-internal-state-account"
+#   version       = "v4"
+# }
+# The bundled example. Point a real deployment at its own IDL under
+# infra/aws/idl/, which is gitignored, so upgrading the template never renames
+# or removes the file a live stack indexes.
+idl_path = "../../idl/idl1.json"
+
+# Yellowstone is the default. A non-empty rpc_url adds automatic gap recovery.
+# For RPC-only polling, set datasource.mode to "rpc" and leave
+# geyser_url/geyser_x_token empty.
+datasource = {
+  mode                  = "yellowstone"
+  poll_interval_seconds = 5
+  replay_window_slots   = 300
+}
+geyser_url             = "https://your-yellowstone-endpoint:443"
+geyser_x_token         = "replace-me"
+rpc_url                = "https://your-solana-rpc-endpoint"
+grafana_admin_password = "replace-with-a-strong-password"
+
+# Optional: ship to a hosted Grafana Cloud stack instead of running Grafana,
+# Loki, and Prometheus on the VM. grafana_admin_password and channel secrets
+# are then unused; create contact points in the hosted stack instead.
+# grafana_cloud = {
+#   loki_url        = "https://logs-prod-XXX.grafana.net/loki/api/v1/push"
+#   loki_user       = "replace-with-loki-tenant-user"
+#   prom_url        = "https://prometheus-prod-XX-prod-XX.grafana.net/api/prom/push"
+#   prom_user       = "replace-with-prom-tenant-user"
+#   token           = "replace-with-access-policy-token"
+#   deployment_name = "my-deployment"
+#   environment     = "prd"
+# }
+
+# Optional: override the application's event and multisig table defaults.
+# dashboard = {
+#   event_fields    = ["name", "data.amount"]
+#   multisig_fields = ["action", "squads_version", "signature", "failed"]
+# }
+
+alerting = {
+  lookback_window_seconds     = 60
+  evaluation_interval_seconds = 10
+}
+
+alerts = [
+  {
+    kind  = "event"
+    name  = "recurring_transfer_event"
+    match = "all"
+    conditions = [
+      { field = "data.amount", operator = "gt", value = 0 },
+      { field = "failed", operator = "eq", value = false },
+    ]
+    severity = "warning"
+    channels = []
+  }
+]
+
+# Set credentials for every channel selected above. Leave unused values empty.
+slack_webhook_url         = ""
+telegram_bot_token        = ""
+telegram_chat_id          = ""
+pagerduty_integration_key = ""
+
+# How long the local-stack Prometheus keeps metrics; Loki keeps 30 days.
+# prometheus_retention = "30d"
+
+# How long the Yellowstone endpoint may fail its readiness probe before /readyz
+# reports unready; 0 disables the check. Defaults to 90.
+# stream_stale_after_seconds = 90
+
+# Deploy a branch, tag, or immutable commit.
+# repository_ref = "feat/my-branch"
+# For a private repository, use its SSH URL and pass a read-only deploy key
+# through TF_VAR_repository_deploy_key instead of writing it to this file.
+# repository_url = "git@github.com:solana-foundation/solana-microscope.git"

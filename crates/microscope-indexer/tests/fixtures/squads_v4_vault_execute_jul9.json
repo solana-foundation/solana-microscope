@@ -1,0 +1,86 @@
+{
+  "blockTime": 1783621044,
+  "meta": {
+    "computeUnitsConsumed": 27647,
+    "costUnits": 30387,
+    "err": null,
+    "fee": 6938,
+    "innerInstructions": [
+      {
+        "index": 3,
+        "instructions": [
+          {
+            "accounts": [
+              4,
+              3,
+              11
+            ],
+            "data": "6vx8P",
+            "programIdIndex": 10,
+            "stackHeight": 2
+          }
+        ]
+      }
+    ],
+    "loadedAddresses": {
+      "readonly": [],
+      "writable": []
+    },
+    "logMessages": [
+      "Program ComputeBudget111111111111111111111111111111 invoke [1]",
+      "Program ComputeBudget111111111111111111111111111111 success",
+      "Program ComputeBudget111111111111111111111111111111 invoke [1]",
+      "Program ComputeBudget111111111111111111111111111111 success",
+      "Program 11111111111111111111111111111111 invoke [1]",
+      "Program 11111111111111111111111111111111 success",
+      "Program SQDS4ep65T869zMMBKyuUq6aD6EgTu8psMjkvj52pCf invoke [1]",
+      "Program log: Instruction: VaultTransactionExecute",
+      "Program BPFLoaderUpgradeab1e11111111111111111111111 invoke [2]",
+      "New authority Some(DXtFpbPjcn2hxPnw79x1Pfoj35vXh5AsWBkS37YnXMVv)",
+      "Program BPFLoaderUpgradeab1e11111111111111111111111 success",
+      "Program SQDS4ep65T869zMMBKyuUq6aD6EgTu8psMjkvj52pCf consumed 27197 of 37197 compute units",
+      "Program SQDS4ep65T869zMMBKyuUq6aD6EgTu8psMjkvj52pCf success"
+    ],
+    "postBalances": [
+      937262595,
+      1058599,
+      4050720,
+      4043569840,
+      4336504560,
+      1,
+      1,
+      12171440,
+      2728320,
+      2603040,
+      1,
+      11000000
+    ],
+    "postTokenBalances": [],
+    "preBalances": [
+      937369533,
+      958599,
+      4050720,
+      4043569840,
+      4336504560,
+      1,
+      1,
+      12171440,
+      2728320,
+      2603040,
+      1,
+      11000000
+    ],
+    "preTokenBalances": [],
+    "rewards": [],
+    "status": {
+      "Ok": null
+    }
+  },
+  "slot": 431851369,
+  "transaction": [
+    "AUHZFAuKa+kS5mHfbAGFkVAb7bJr4s3dtAApquIIgtf8P96y0avSIaEL6Qt5qRs7hwkTM6L7pXcY1bp9gr7u7g2AAQAHDBhKtKrwzCDYtM8w1r1tCM3/KeDfGJ1IcyiHkjS9Q/oxv5cbWRCLW4WgT7CT8eIbTj/UxMj0h90JuVdSdp8N2MOJUNLqsirEa73hr+mbIPTsd91sHQ8TobwrWCh0xBm3J00+y/KpSybLkj1uLih3Jh767zSWJIMD/7UpYZDO5Ew4MoX5AgIcyZKXH0WK733aBaolqY0Z5KHZkycQZgaHO7IDBkZv5SEXMv/srbpyw5vnvIzlu8X3EmssQ5s6QAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABoHEzkfiI2i4sVVeyIevCS78fvu2bKP1L79o1Kyct6ieYuj15Tk0fHe4MRaCqgfishc549Ln2dl+nbkJjrVKXTocuVYqTA7wXFsc14eieKmUvsnOc3qbThCuV2JCpXq0Aqj2kU6IobDiEBU+92OuKwDCuT0WwSTSwFN6EASAAAC6NZ9IWKplwVwEZQcCg5W/W2e1HNg41wL9Hhb8xJlpvcCjypW9t0KERXih6zCy+4IJ0hnLriymfVkupPdwI4yCBAUABQIPkwAABQAJAwDJAAAAAAAABgIAAQwCAAAAoIYBAAAAAAAHCAgCCQADBAoLCMIIoVeZpBmrAA==",
+    "base64"
+  ],
+  "transactionIndex": 1313,
+  "version": 0
+}

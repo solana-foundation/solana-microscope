@@ -1,0 +1,51 @@
+name: Build
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  release-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 1
+
+      - uses: ./.github/actions/setup
+        with:
+          rust-cache-key: rust-release
+          save-rust-cache: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build release indexer
+        run: just build
+
+  container-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 1
+
+      - name: Seed the runnable example configuration
+        run: cp microscope.toml.example microscope.toml
+
+      - name: Build deployment image
+        run: docker build --tag solana-microscope-indexer:ci .
+
+      - name: Validate Docker Compose
+        env:
+          GEYSER_URL: https://example.invalid
+          GEYSER_X_TOKEN: ''
+          GRAFANA_ADMIN_PASSWORD: validation-only
+        run: docker compose config --quiet

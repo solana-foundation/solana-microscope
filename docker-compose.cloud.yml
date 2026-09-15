@@ -1,0 +1,29 @@
+# Grafana Cloud overlay: ships logs and metrics to a hosted Grafana Cloud
+# stack instead of running Loki, Prometheus, and Grafana locally.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.cloud.yml up -d
+services:
+  alloy:
+    depends_on: !reset []
+    environment:
+      GRAFANA_CLOUD_LOKI_URL: ${GRAFANA_CLOUD_LOKI_URL:?GRAFANA_CLOUD_LOKI_URL must be set}
+      GRAFANA_CLOUD_LOKI_USER: ${GRAFANA_CLOUD_LOKI_USER:?GRAFANA_CLOUD_LOKI_USER must be set}
+      GRAFANA_CLOUD_PROM_URL: ${GRAFANA_CLOUD_PROM_URL:?GRAFANA_CLOUD_PROM_URL must be set}
+      GRAFANA_CLOUD_PROM_USER: ${GRAFANA_CLOUD_PROM_USER:?GRAFANA_CLOUD_PROM_USER must be set}
+      GRAFANA_CLOUD_TOKEN: ${GRAFANA_CLOUD_TOKEN:?GRAFANA_CLOUD_TOKEN must be set}
+      MICROSCOPE_DEPLOYMENT: ${MICROSCOPE_DEPLOYMENT:?MICROSCOPE_DEPLOYMENT must be set}
+      MICROSCOPE_ENV: ${MICROSCOPE_ENV:-prd}
+    volumes:
+      - ./alloy/config.cloud.alloy:/etc/alloy/config.alloy:ro
+
+  alerting-config:
+    profiles: [local-stack]
+
+  prometheus:
+    profiles: [local-stack]
+
+  loki:
+    profiles: [local-stack]
+
+  grafana:
+    profiles: [local-stack]

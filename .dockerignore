@@ -1,0 +1,26 @@
+# Build inputs are limited to the Rust workspace, IDLs, generator tooling, and
+# the per-deployment microscope.toml.
+target/
+.git/
+.github/
+.githooks/
+.claude/
+.emdash/
+.local/
+.remember/
+# Local environment files may contain credentials.
+.env
+.env.*
+node_modules/
+# Regenerated inside the builder stage.
+crates/program-decoder/
+crates/squads-v3-decoder/
+crates/squads-v4-decoder/
+crates/squads-smart-account-decoder/
+grafana/*
+!grafana/dashboard-templates/
+!grafana/dashboard-templates/overview.json
+prometheus/
+loki/
+alloy/
+infra/

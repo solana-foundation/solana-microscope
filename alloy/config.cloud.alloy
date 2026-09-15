@@ -1,0 +1,91 @@
+discovery.docker "containers" {
+  host             = "unix:///var/run/docker.sock"
+  refresh_interval = "5s"
+}
+
+// Keep only this compose project's indexer container: the Docker socket
+// exposes every container on the host, including other Microscope stacks.
+discovery.relabel "indexer_logs" {
+  targets = []
+
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_project"]
+    regex         = sys.env("COMPOSE_PROJECT_NAME")
+    action        = "keep"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    regex         = "indexer"
+    action        = "keep"
+  }
+
+  rule {
+    replacement  = "microscope-indexer"
+    target_label = "service_name"
+  }
+}
+
+loki.source.docker "indexer" {
+  host          = "unix:///var/run/docker.sock"
+  targets       = discovery.docker.containers.targets
+  relabel_rules = discovery.relabel.indexer_logs.rules
+  forward_to    = [loki.write.grafana_cloud.receiver]
+}
+
+loki.source.api "backfill" {
+  http {
+    listen_address = "0.0.0.0"
+    listen_port    = 3100
+  }
+
+  forward_to = [loki.write.grafana_cloud.receiver]
+}
+
+loki.write "grafana_cloud" {
+  endpoint {
+    url = sys.env("GRAFANA_CLOUD_LOKI_URL")
+
+    basic_auth {
+      username = sys.env("GRAFANA_CLOUD_LOKI_USER")
+      password = sys.env("GRAFANA_CLOUD_TOKEN")
+    }
+  }
+
+  external_labels = {
+    service    = "microscope",
+    deployment = sys.env("MICROSCOPE_DEPLOYMENT"),
+    env        = sys.env("MICROSCOPE_ENV"),
+  }
+}
+
+prometheus.scrape "indexer" {
+  targets         = [{ "__address__" = "indexer:9090" }]
+  job_name        = "microscope-indexer"
+  scrape_interval = "15s"
+  forward_to      = [prometheus.remote_write.grafana_cloud.receiver]
+}
+
+prometheus.scrape "alloy" {
+  targets         = [{ "__address__" = "127.0.0.1:12345" }]
+  job_name        = "alloy"
+  scrape_interval = "15s"
+  forward_to      = [prometheus.remote_write.grafana_cloud.receiver]
+}
+
+prometheus.remote_write "grafana_cloud" {
+  endpoint {
+    url = sys.env("GRAFANA_CLOUD_PROM_URL")
+
+    basic_auth {
+      username = sys.env("GRAFANA_CLOUD_PROM_USER")
+      password = sys.env("GRAFANA_CLOUD_TOKEN")
+    }
+  }
+
+  external_labels = {
+    service    = "microscope",
+    deployment = sys.env("MICROSCOPE_DEPLOYMENT"),
+    env        = sys.env("MICROSCOPE_ENV"),
+  }
+}

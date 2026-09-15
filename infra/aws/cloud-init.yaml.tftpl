@@ -1,0 +1,81 @@
+#cloud-config
+package_update: true
+packages:
+  - ca-certificates
+  - curl
+  - docker.io
+  - docker-compose-v2
+  - git
+  - jq
+  - util-linux
+
+# Noble has no awscli apt package; the supported route is the aws-cli snap.
+snap:
+  commands:
+    - snap install aws-cli --classic
+
+write_files:
+  - path: /etc/solana-microscope/bootstrap.env
+    owner: root:root
+    permissions: "0600"
+    content: |
+      CLOUD_PROVIDER_B64=${cloud_provider_b64}
+      DEPLOYMENT_BUCKET_B64=${deployment_bucket_b64}
+      DEPLOYMENT_MANIFEST_B64=${deployment_manifest_b64}
+      RUNTIME_SECRET_B64=${runtime_secret_b64}
+      AWS_REGION_B64=${aws_region_b64}
+  - path: /usr/local/sbin/deploy-microscope
+    owner: root:root
+    permissions: "0700"
+    encoding: b64
+    content: ${deploy_script_b64}
+  - path: /etc/logrotate.d/microscope-deploy
+    owner: root:root
+    permissions: "0644"
+    content: |
+      /var/log/microscope-deploy.log {
+        daily
+        maxsize 20M
+        rotate 5
+        compress
+        missingok
+        notifempty
+        copytruncate
+      }
+  - path: /etc/systemd/system/microscope-deploy.service
+    owner: root:root
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Reconcile Solana Microscope deployment
+      Wants=network-online.target
+      After=network-online.target docker.service
+
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/sbin/deploy-microscope
+      # Must outlast a cold build, or the timer below restarts it forever.
+      TimeoutStartSec=3h
+  - path: /etc/systemd/system/microscope-deploy.timer
+    owner: root:root
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Periodically reconcile Solana Microscope deployment
+
+      [Timer]
+      OnUnitInactiveSec=60s
+      AccuracySec=5s
+      Persistent=true
+
+      [Install]
+      WantedBy=timers.target
+
+runcmd:
+  - [systemctl, enable, --now, docker]
+  - [systemctl, daemon-reload]
+  - [systemctl, enable, microscope-deploy.timer]
+  - [systemctl, start, microscope-deploy.service]
+  - [systemctl, start, microscope-deploy.timer]
+
+final_message: "Solana Microscope bootstrap finished after $UPTIME seconds"

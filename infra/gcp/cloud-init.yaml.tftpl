@@ -1,0 +1,95 @@
+#cloud-config
+package_update: true
+packages:
+  - ca-certificates
+  - curl
+  - docker.io
+  - docker-compose-v2
+  - git
+  - iptables
+  - jq
+  - util-linux
+
+write_files:
+  - path: /etc/solana-microscope/bootstrap.env
+    owner: root:root
+    permissions: "0600"
+    content: |
+      CLOUD_PROVIDER_B64=${cloud_provider_b64}
+      DEPLOYMENT_BUCKET_B64=${deployment_bucket_b64}
+      DEPLOYMENT_MANIFEST_B64=${deployment_manifest_b64}
+      RUNTIME_SECRET_B64=${runtime_secret_b64}
+      GCP_PROJECT_ID_B64=${gcp_project_id_b64}
+  - path: /usr/local/sbin/deploy-microscope
+    owner: root:root
+    permissions: "0700"
+    encoding: b64
+    content: ${deploy_script_b64}
+  - path: /etc/logrotate.d/microscope-deploy
+    owner: root:root
+    permissions: "0644"
+    content: |
+      /var/log/microscope-deploy.log {
+        daily
+        maxsize 20M
+        rotate 5
+        compress
+        missingok
+        notifempty
+        copytruncate
+      }
+  - path: /etc/systemd/system/microscope-metadata-guard.service
+    owner: root:root
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Reject container traffic to the instance metadata server
+      After=docker.service
+      PartOf=docker.service
+
+      [Service]
+      Type=oneshot
+      RemainAfterExit=yes
+      # Port 80 only: 169.254.169.254 is also the instance DNS resolver.
+      ExecStart=/bin/sh -c 'iptables --check DOCKER-USER --destination 169.254.169.254 --protocol tcp --destination-port 80 --jump REJECT --reject-with icmp-port-unreachable || iptables --insert DOCKER-USER --destination 169.254.169.254 --protocol tcp --destination-port 80 --jump REJECT --reject-with icmp-port-unreachable'
+
+      [Install]
+      WantedBy=multi-user.target
+  - path: /etc/systemd/system/microscope-deploy.service
+    owner: root:root
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Reconcile Solana Microscope deployment
+      Wants=network-online.target microscope-metadata-guard.service
+      After=network-online.target docker.service microscope-metadata-guard.service
+
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/sbin/deploy-microscope
+      # Must outlast a cold build, or the timer below restarts it forever.
+      TimeoutStartSec=3h
+  - path: /etc/systemd/system/microscope-deploy.timer
+    owner: root:root
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Periodically reconcile Solana Microscope deployment
+
+      [Timer]
+      OnUnitInactiveSec=60s
+      AccuracySec=5s
+      Persistent=true
+
+      [Install]
+      WantedBy=timers.target
+
+runcmd:
+  - [systemctl, enable, --now, docker]
+  - [systemctl, daemon-reload]
+  - [systemctl, enable, --now, microscope-metadata-guard]
+  - [systemctl, enable, microscope-deploy.timer]
+  - [systemctl, start, microscope-deploy.service]
+  - [systemctl, start, microscope-deploy.timer]
+
+final_message: "Solana Microscope bootstrap finished after $UPTIME seconds"

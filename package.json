@@ -1,0 +1,20 @@
+{
+    "name": "solana-microscope-tooling",
+    "description": "Decoder-generation tooling for Solana Microscope",
+    "private": true,
+    "license": "MIT",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/solana-foundation/solana-microscope.git"
+    },
+    "engines": {
+        "node": ">=20"
+    },
+    "dependencies": {
+        "@sevenlabs-hq/carbon-cli": "2.0.0",
+        "@sevenlabs-hq/carbon-codama-renderer": "2.0.0"
+    },
+    "overrides": {
+        "toml": "^5.0.0"
+    }
+}
