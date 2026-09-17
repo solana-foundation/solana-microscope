@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use carbon_core::{
     datasource::{Datasource, DatasourceDisconnection, DatasourceId, Update, UpdateType},
     error::CarbonResult,
+    pipeline::DEFAULT_CHANNEL_BUFFER_SIZE,
 };
 use carbon_yellowstone_grpc_datasource::{
     YellowstoneGrpcClientConfig, YellowstoneGrpcGeyserClient,
@@ -20,8 +21,10 @@ use crate::{delivered::DeliveredSignatures, health, telemetry};
 
 /// The datasource notifies with `try_send` and discards on a full channel.
 const DISCONNECT_NOTIFICATION_BUFFER: usize = 16;
-/// Forwarding is a relay, not a queue; the pipeline channel absorbs bursts.
-const FORWARDING_BUFFER: usize = 1;
+/// The datasource forwards with `try_send`, so anything this cannot hold is
+/// discarded rather than awaited. Matching the pipeline channel keeps the relay
+/// from being the narrower of the two.
+const FORWARDING_BUFFER: usize = DEFAULT_CHANNEL_BUFFER_SIZE;
 /// Several attempts have to fit inside the grace window, or a single dropped
 /// probe decides readiness on its own.
 const PROBE_INTERVAL: Duration = Duration::from_secs(15);
@@ -269,7 +272,7 @@ mod tests {
 
     use super::{
         client, reconnect, record_disconnections, transaction_filters, RecordingDatasource,
-        STREAM_TIMEOUT,
+        DEFAULT_CHANNEL_BUFFER_SIZE, STREAM_TIMEOUT,
     };
     use crate::delivered::DeliveredSignatures;
     use std::time::Duration;
@@ -299,6 +302,44 @@ mod tests {
                     block_hash: None,
                 }));
                 let _ = sender.send((update, id.clone())).await;
+            }
+            Ok(())
+        }
+
+        fn update_types(&self) -> Vec<UpdateType> {
+            vec![UpdateType::Transaction]
+        }
+    }
+
+    /// Mirrors carbon's yellowstone datasource, which never awaits a full
+    /// channel.
+    struct TrySendDatasource {
+        updates: Vec<(Signature, u64)>,
+        rejected: Arc<Mutex<Vec<Signature>>>,
+    }
+
+    #[async_trait]
+    impl Datasource for TrySendDatasource {
+        async fn consume(
+            &self,
+            id: DatasourceId,
+            sender: mpsc::Sender<(Update, DatasourceId)>,
+            _cancellation_token: CancellationToken,
+        ) -> CarbonResult<()> {
+            for (signature, slot) in &self.updates {
+                let update = Update::Transaction(Box::new(TransactionUpdate {
+                    signature: *signature,
+                    transaction: Default::default(),
+                    meta: TransactionStatusMeta::default(),
+                    is_vote: false,
+                    slot: *slot,
+                    index: None,
+                    block_time: None,
+                    block_hash: None,
+                }));
+                if sender.try_send((update, id.clone())).is_err() {
+                    self.rejected.lock().unwrap().push(*signature);
+                }
             }
             Ok(())
         }
@@ -410,6 +451,43 @@ mod tests {
             delivered.drain().await,
             [(signature(1), 100), (signature(2), 101)]
         );
+    }
+
+    /// Carbon's datasource sends with `try_send`, so a relay too small to hold
+    /// a slot's worth of updates discards them instead of applying
+    /// backpressure. Two transactions in one slot is the common case that
+    /// exposes it.
+    #[tokio::test]
+    async fn keeps_every_update_a_datasource_offers_without_awaiting() {
+        let rejected = Arc::new(Mutex::new(Vec::new()));
+        let delivered = DeliveredSignatures::new();
+        let datasource = RecordingDatasource::new(
+            TrySendDatasource {
+                updates: vec![(signature(1), 100), (signature(2), 100)],
+                rejected: rejected.clone(),
+            },
+            delivered.clone(),
+        );
+        let (sender, mut receiver) = mpsc::channel(DEFAULT_CHANNEL_BUFFER_SIZE);
+
+        datasource
+            .consume(DatasourceId::new_unique(), sender, CancellationToken::new())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            *rejected.lock().unwrap(),
+            Vec::<Signature>::new(),
+            "the relay discarded updates the datasource could not await"
+        );
+        let mut forwarded = Vec::new();
+        while let Ok((update, _)) = receiver.try_recv() {
+            let Update::Transaction(transaction) = update else {
+                panic!("the stub only emits transactions");
+            };
+            forwarded.push((transaction.signature, transaction.slot));
+        }
+        assert_eq!(forwarded, [(signature(1), 100), (signature(2), 100)]);
     }
 
     /// An update the pipeline never received must stay rediscoverable by the
