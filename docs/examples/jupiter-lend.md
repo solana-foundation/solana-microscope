@@ -178,18 +178,12 @@ restarting Grafana alone leaves the previous rules in place.
 
 ## Monitoring a different program
 
-Three values change. For the Jupiter Lend Borrow side:
+Download that program's IDL, put it wherever `idl_path` points, and change the
+two values. For the Jupiter Lend Borrow side:
 
 ```toml
 program_id = "jupr81YtYssSyPt8jbnGuiWon5f6x9TcDEFxYe3Bdzi"
 idl_path = "examples/jupiter-lend/vaults.json"
-```
-
-Download the matching IDL first:
-
-```sh
-curl -o examples/jupiter-lend/vaults.json \
-  https://raw.githubusercontent.com/jup-ag/jupiter-lend/main/target/idl/vaults.json
 ```
 
 The alert names have to change too, because they are validated against the IDL.
