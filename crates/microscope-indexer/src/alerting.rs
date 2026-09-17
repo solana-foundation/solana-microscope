@@ -345,7 +345,7 @@ fn datasource_drop_rules(channels: &BTreeSet<AlertChannel>) -> Vec<Value> {
                 "critical",
                 "datasource_updates_dropped",
                 channel,
-                "The Yellowstone datasource discarded a monitored update because the pipeline's shared channel was full. That transaction is permanently lost unless RPC_URL is configured, in which case polling re-delivers it within the replay window.",
+                "The Yellowstone datasource discarded a monitored update because the channel it forwards into was full; the signature is in the log line. With RPC_URL configured the poller re-delivers it within the replay window, so confirm the transaction was indexed rather than treating it as lost. Without RPC_URL the transaction is lost and that slot needs a backfill.",
             )
         })
         .collect()
