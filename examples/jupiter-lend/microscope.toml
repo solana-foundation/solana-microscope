@@ -15,8 +15,8 @@ vault_address = "4MsgBB5VPoTrUSp5XnfbViV386C1UnsTdifLBw33ZMSJ"
 state_address = "J3mJ3wz6xkVUk3T8qHnuAYNxsRH3ixHsryYNZAU2vG8P"
 version = "v4"
 
-# The program sees under one transaction per second, so polling a public RPC
-# endpoint keeps up without a Yellowstone subscription.
+# The program averages about 0.05 transactions per second, so a polled public
+# RPC endpoint keeps up and no Yellowstone subscription is needed.
 [datasource]
 mode = "rpc"
 poll_interval_seconds = 5
