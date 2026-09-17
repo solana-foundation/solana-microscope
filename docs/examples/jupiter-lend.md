@@ -1,12 +1,13 @@
 # Walkthrough: monitoring Jupiter Lend
 
 > **This is a teaching example, not a service.** Jupiter Lend was chosen
-> because it is a real protocol whose IDL is published, whose volume fits a
-> laptop, and whose upgrade authority is a Squads multisig. Solana Foundation
-> does not operate this deployment, does not monitor Jupiter Lend on anyone's
-> behalf, and is not affiliated with or endorsed by Jupiter. Nothing here is a
-> security assessment of Jupiter Lend, and none of it is financial advice. The
-> program IDs, multisig addresses, and IDL in this example were verified
+> because it is a real protocol whose IDL is published, whose transaction rate
+> is low enough to index from a public RPC endpoint, and whose upgrade
+> authority is a Squads multisig. Solana Foundation does not operate this
+> deployment, does not monitor Jupiter Lend on anyone's behalf, and is not
+> affiliated with or endorsed by Jupiter. Nothing here is a security assessment
+> of Jupiter Lend, and none of it is financial advice. The program IDs,
+> multisig addresses, and IDL in this example were verified
 > against mainnet on 2026-09-17; a protocol can upgrade its programs or move
 > its governance at any time, so confirm them yourself before relying on this
 > config.
@@ -38,10 +39,12 @@ whatever program you monitor next:
    `target/idl/`. Microscope decodes from an IDL; without one there is nothing
    to decode. `examples/jupiter-lend/lending.json` is a copy of
    `target/idl/lending.json` at version `0.1.4`.
-2. **Its volume fits a laptop.** The lending program sees under one transaction
-   per second, so a polled public RPC endpoint keeps up and the local Loki
-   volume stays small. A high-volume AMM at 200+ transactions per second needs a
-   Yellowstone gRPC subscription and real disk.
+2. **Its transaction rate is low.** The lending program averages about 0.05
+   transactions per second, so polling a public RPC endpoint every 5 seconds
+   keeps up and the local Loki volume stays small. Orca's Whirlpool program, by
+   comparison, runs at roughly 200 transactions per second and Meteora's DLMM
+   at 500: both need a Yellowstone gRPC subscription and provisioned disk, and
+   neither makes a good first example.
 3. **It is governed by a Squads multisig.** Its upgrade authority,
    `4MsgBB5VPoTrUSp5XnfbViV386C1UnsTdifLBw33ZMSJ`, is a Squads v4 vault, so one
    deployment covers both the protocol and the governance that can change it.
