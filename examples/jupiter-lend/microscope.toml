@@ -1,0 +1,75 @@
+# Jupiter Lend (Earn) walkthrough config. See docs/examples/jupiter-lend.md.
+# Copy to the repository root as microscope.toml before running the stack.
+#
+# This is a teaching example. Solana Foundation does not operate this
+# deployment and is not affiliated with Jupiter. The addresses below were
+# verified against mainnet on 2026-09-17; confirm them before relying on them.
+program_id = "jup3YeL8QhtSx1e253b2FDvsMNC87fDrgQZivbrndc9"
+idl_path = "examples/jupiter-lend/lending.json"
+
+# The Squads v4 multisig that holds the upgrade authority for the Jupiter Lend
+# programs. Monitoring it alongside the program shows both the protocol's
+# activity and the governance that can change it.
+[multisig]
+vault_address = "4MsgBB5VPoTrUSp5XnfbViV386C1UnsTdifLBw33ZMSJ"
+state_address = "J3mJ3wz6xkVUk3T8qHnuAYNxsRH3ixHsryYNZAU2vG8P"
+version = "v4"
+
+# The program sees under one transaction per second, so polling a public RPC
+# endpoint keeps up without a Yellowstone subscription.
+[datasource]
+mode = "rpc"
+poll_interval_seconds = 5
+replay_window_slots = 300
+
+[dashboard]
+event_fields = ["name", "signature", "slot", "failed", "data.assets"]
+multisig_fields = ["action", "squads_version", "instruction", "signature", "slot", "failed"]
+
+[alerting]
+lookback_window_seconds = 60
+evaluation_interval_seconds = 10
+explorer_transaction_url = "https://explorer.solana.com/tx/{signature}"
+
+# Every alert below leaves channels empty so the rules evaluate in Grafana
+# without any notification credentials. Add "slack", "telegram", or
+# "pagerduty" once the matching values are set in .env.
+
+# Changing who controls the lending program.
+[[alerts]]
+kind = "instruction"
+name = "update_authority"
+severity = "critical"
+channels = []
+
+[[alerts]]
+kind = "instruction"
+name = "update_auths"
+severity = "critical"
+channels = []
+
+# Changing depositor rewards.
+[[alerts]]
+kind = "instruction"
+name = "set_rewards_rate_model"
+severity = "warning"
+channels = []
+
+# Ordinary deposits, to show decoded event fields reaching a rule.
+[[alerts]]
+kind = "event"
+name = "log_deposit"
+match = "all"
+conditions = [
+  { field = "data.assets", operator = "gt", value = 0 },
+  { field = "failed", operator = "eq", value = false },
+]
+severity = "info"
+channels = []
+
+# Anything proposed in the multisig that can upgrade the program.
+[[alerts]]
+kind = "multisig"
+name = "proposal_created"
+severity = "warning"
+channels = []
