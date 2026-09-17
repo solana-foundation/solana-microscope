@@ -2,8 +2,8 @@
 
 > **This is a teaching example, not a service.** Jupiter Lend was chosen
 > because it is a real protocol whose IDL is published, whose transaction rate
-> is low enough to index from a public RPC endpoint, and whose upgrade
-> authority is a Squads multisig. Solana Foundation does not operate this
+> is small enough to index on one machine, and whose upgrade authority is a
+> Squads multisig. Solana Foundation does not operate this
 > deployment, does not monitor Jupiter Lend on anyone's behalf, and is not
 > affiliated with or endorsed by Jupiter. The program IDs, multisig addresses,
 > and IDL in this example were verified against mainnet on 2026-09-17; a
@@ -12,7 +12,7 @@
 
 This walkthrough runs the full Microscope stack against a live mainnet DeFi
 protocol, [Jupiter Lend](https://jup.ag/lend), plus the Squads multisig that
-holds its upgrade authority. It needs Docker, a public Solana RPC endpoint, and
+holds its upgrade authority. It needs Docker, a Yellowstone gRPC endpoint, and
 about ten minutes. Nothing here is specific to Jupiter: swap three values at the
 end and the same walkthrough monitors your own program.
 
@@ -38,11 +38,10 @@ whatever program you monitor next:
    to decode. `examples/jupiter-lend/lending.json` is a copy of
    `target/idl/lending.json` at version `0.1.4`.
 2. **Its transaction rate is low.** The lending program averages about 0.05
-   transactions per second, so polling a public RPC endpoint every 5 seconds
-   keeps up and the local Loki volume stays small. Orca's Whirlpool program, by
-   comparison, runs at roughly 200 transactions per second and Meteora's DLMM
-   at 500: both need a Yellowstone gRPC subscription and provisioned disk, and
-   neither makes a good first example.
+   transactions per second, so the local Prometheus and Loki volumes stay
+   small. Orca's Whirlpool program, by comparison, runs at roughly 200
+   transactions per second and Meteora's DLMM at 500, which needs provisioned
+   disk and makes a poor first example.
 3. **It is governed by a Squads multisig.** Its upgrade authority,
    `4MsgBB5VPoTrUSp5XnfbViV386C1UnsTdifLBw33ZMSJ`, is a Squads v4 vault, so one
    deployment covers both the protocol and the governance that can change it.
@@ -62,18 +61,26 @@ cp examples/jupiter-lend/microscope.toml microscope.toml
 `microscope.toml` at the repository root is the deployment config, and it is
 gitignored. The copy under `examples/` is the source you started from.
 
-## 2. Point it at an RPC endpoint
+## 2. Point it at an endpoint
 
 Create a `.env` file:
 
 ```dotenv
-RPC_URL=https://api.mainnet-beta.solana.com
+GEYSER_URL=https://your-yellowstone-endpoint:443
+GEYSER_X_TOKEN=your-token
+RPC_URL=https://your-solana-rpc-endpoint
 GRAFANA_ADMIN_PASSWORD=replace-with-a-strong-password
 ```
 
-The example config sets `datasource.mode = "rpc"`, so no Yellowstone endpoint is
-needed. A public endpoint is enough at this program's volume; a dedicated
-endpoint is steadier if you leave the stack running for days.
+The example config omits the `[datasource]` section, so the indexer streams from
+Yellowstone. `RPC_URL` is optional in that mode but worth setting: it adds gap
+recovery when the stream cannot replay through a disconnect, and `just backfill`
+needs it. [`docs/operations.md`](../operations.md) covers sourcing both
+endpoints.
+
+To run without a Yellowstone subscription, add a `[datasource]` section with
+`mode = "rpc"` and set `RPC_URL` alone. At this program's rate a polled public
+endpoint keeps up.
 
 ## 3. Start the stack
 
@@ -87,9 +94,7 @@ minutes. On startup the indexer confirms the multisig addresses against the
 chain:
 
 ```text
-microscope-indexer starting: program_id=jup3YeL8QhtSx1e253b2FDvsMNC87fDrgQZivbrndc9 datasource=rpc alert_rules=5
 verified configured Squads v4 vault 4MsgBB5VPoTrUSp5XnfbViV386C1UnsTdifLBw33ZMSJ and state account J3mJ3wz6xkVUk3T8qHnuAYNxsRH3ixHsryYNZAU2vG8P
-RPC polling for jup3YeL8QhtSx1e253b2FDvsMNC87fDrgQZivbrndc9 starts at slot 447813741, replaying up to confirmed slot 447814041
 ```
 
 Within a minute or two, decoded records start appearing. A deposit looks like
