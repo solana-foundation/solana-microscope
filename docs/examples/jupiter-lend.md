@@ -5,12 +5,10 @@
 > is low enough to index from a public RPC endpoint, and whose upgrade
 > authority is a Squads multisig. Solana Foundation does not operate this
 > deployment, does not monitor Jupiter Lend on anyone's behalf, and is not
-> affiliated with or endorsed by Jupiter. Nothing here is a security assessment
-> of Jupiter Lend, and none of it is financial advice. The program IDs,
-> multisig addresses, and IDL in this example were verified
-> against mainnet on 2026-09-17; a protocol can upgrade its programs or move
-> its governance at any time, so confirm them yourself before relying on this
-> config.
+> affiliated with or endorsed by Jupiter. The program IDs, multisig addresses,
+> and IDL in this example were verified against mainnet on 2026-09-17; a
+> protocol can upgrade its programs or move its governance at any time, so
+> confirm them yourself before relying on this config.
 
 This walkthrough runs the full Microscope stack against a live mainnet DeFi
 protocol, [Jupiter Lend](https://jup.ag/lend), plus the Squads multisig that
