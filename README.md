@@ -46,6 +46,13 @@ One deployment monitors one program and, optionally, one Squads multisig.
 
 ## Quick start
 
+To follow a complete example against a live mainnet protocol instead of
+configuring your own, see
+[`docs/examples/jupiter-lend.md`](docs/examples/jupiter-lend.md), which monitors
+Jupiter Lend and the Squads multisig that can upgrade it. It is a teaching
+example only: Solana Foundation does not operate that deployment and is not
+affiliated with Jupiter.
+
 Requirements:
 
 - Docker Engine with Docker Compose v2
