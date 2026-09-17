@@ -1,14 +1,12 @@
 # Walkthrough: monitoring Jupiter Lend
 
-> **This is a teaching example, not a service.** Jupiter Lend was chosen
-> because it is a real protocol whose IDL is published, whose transaction rate
-> is small enough to index on one machine, and whose upgrade authority is a
-> Squads multisig. Solana Foundation does not operate this
-> deployment, does not monitor Jupiter Lend on anyone's behalf, and is not
-> affiliated with or endorsed by Jupiter. The program IDs, multisig addresses,
-> and IDL in this example were verified against mainnet on 2026-09-17; a
-> protocol can upgrade its programs or move its governance at any time, so
-> confirm them yourself before relying on this config.
+> **This is a teaching example, not a service.** Jupiter Lend was chosen because
+> its IDL is public and it has invariants worth watching. Solana Foundation does
+> not operate this deployment, does not monitor Jupiter Lend on anyone's behalf,
+> and is not affiliated with or endorsed by Jupiter. The program IDs, multisig
+> addresses, and IDL in this example were verified against mainnet on
+> 2026-09-17; a protocol can upgrade its programs or move its governance at any
+> time, so confirm them yourself before relying on this config.
 
 This walkthrough runs the full Microscope stack against a live mainnet DeFi
 protocol, [Jupiter Lend](https://jup.ag/lend), plus the Squads multisig that
@@ -29,22 +27,20 @@ end and the same walkthrough monitors your own program.
 
 ## Why this program
 
-Jupiter Lend is a good example for three reasons that are worth checking for
-whatever program you monitor next:
+Two reasons, and both are worth checking for whatever program you monitor next.
 
-1. **Its IDL is available.** The Anchor IDL is published at
+1. **Its IDL is public.** The Anchor IDL is published at
    [`jup-ag/jupiter-lend`](https://github.com/jup-ag/jupiter-lend) under
    `target/idl/`. Microscope decodes from an IDL; without one there is nothing
    to decode. `examples/jupiter-lend/lending.json` is a copy of
    `target/idl/lending.json` at version `0.1.4`.
-2. **Its transaction rate is low.** The lending program averages about 0.05
-   transactions per second, so the local Prometheus and Loki volumes stay
-   small. Orca's Whirlpool program, by comparison, runs at roughly 200
-   transactions per second and Meteora's DLMM at 500, which needs provisioned
-   disk and makes a poor first example.
-3. **It is governed by a Squads multisig.** Its upgrade authority,
-   `4MsgBB5VPoTrUSp5XnfbViV386C1UnsTdifLBw33ZMSJ`, is a Squads v4 vault, so one
-   deployment covers both the protocol and the governance that can change it.
+2. **It has invariants worth watching.** The interesting instructions are the
+   privileged ones: `update_authority` and `update_auths` change who controls
+   the lending program, and `set_rewards_rate_model` changes depositor rewards.
+   The upgrade authority is a Squads v4 vault,
+   `4MsgBB5VPoTrUSp5XnfbViV386C1UnsTdifLBw33ZMSJ`, so a single deployment can
+   alert on both a privileged call and the multisig proposal that authorized
+   it.
 
 Jupiter Lend is made of three programs that share that one multisig. This
 walkthrough monitors `lending`, the Earn side. Swapping to another one is three
@@ -79,8 +75,7 @@ needs it. [`docs/operations.md`](../operations.md) covers sourcing both
 endpoints.
 
 To run without a Yellowstone subscription, add a `[datasource]` section with
-`mode = "rpc"` and set `RPC_URL` alone. At this program's rate a polled public
-endpoint keeps up.
+`mode = "rpc"` and set `RPC_URL` alone.
 
 ## 3. Start the stack
 
