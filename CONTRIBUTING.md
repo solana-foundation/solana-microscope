@@ -5,9 +5,13 @@ Thank you for helping improve Solana Microscope.
 ## Before you start
 
 - Search existing issues and pull requests before opening a new one.
-- For substantial changes, open an issue or start a discussion first so
-  maintainers can confirm the approach. Small, focused pull requests are
-  preferred.
+- Open an issue first and wait for a maintainer to label it `accepted`. Every
+  pull request has to reference such an issue with `Fixes #<issue>`; CI labels
+  the ones that don't `needs-issue` and closes them, with the exception of
+  typos, broken links, and comment-only fixes, which declare
+  `Linked issue: trivial` in the description instead. Agreeing on the approach
+  before anyone writes code is what keeps a finished change from being
+  rejected on scope. Small, focused pull requests are preferred.
 - Use the latest `main` branch when reproducing a problem.
 - Never include secrets, private keys, seed phrases, or production credentials
   in issues, pull requests, commits, logs, or screenshots. This repository is a
@@ -16,7 +20,8 @@ Thank you for helping improve Solana Microscope.
   data such as program IDs, vault addresses, and host names.
 - All commits into a Solana Foundation repository require
   [commit signature verification](https://docs.github.com/en/authentication/managing-commit-signature-verification/about-commit-signature-verification).
-  Pull requests are not merged without it.
+  CI requests changes on a pull request carrying an unverified commit and
+  dismisses that review once every commit verifies.
 
 ## Security vulnerabilities
 
