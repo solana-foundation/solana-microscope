@@ -452,10 +452,15 @@ fn rpc_health_rules(
     let channel_names = health_channel_names(channels);
     let stale_after_seconds = config.datasource.rpc_poll_stale_after_seconds();
     let lag_threshold_slots = config.datasource.replay_window_slots.saturating_mul(2);
-    let failure_threshold = (config.alerting.rpc_poll_sustained_failure_seconds
-        / config.datasource.poll_interval_seconds.max(1))
-    .max(1);
     let sustained_failure_seconds = config.alerting.rpc_poll_sustained_failure_seconds;
+    let poll_interval_seconds = config.datasource.poll_interval_seconds.max(1);
+    // Rounding up, and comparing with `>=`, so the rule fires on the poll that
+    // completes the configured duration rather than the one after it. A
+    // duration below the interval still costs a whole poll, which is the
+    // soonest a failure can be observed at all.
+    let failure_threshold = sustained_failure_seconds
+        .div_ceil(poll_interval_seconds)
+        .max(1);
     channel_names
         .into_iter()
         .flat_map(|channel| {
@@ -494,13 +499,13 @@ fn rpc_health_rules(
                     &format!(
                         "increase(microscope_rpc_poll_failures_total[{RPC_POLL_FAILURE_WINDOW_SECONDS}s])"
                     ),
-                    &format!("$B > {failure_threshold}"),
+                    &format!("$B >= {failure_threshold}"),
                     "OK",
                     "warning",
                     "rpc_poll_failing",
                     channel,
                     &format!(
-                        "More than {failure_threshold} RPC polls failed in the last {RPC_POLL_FAILURE_WINDOW_SECONDS} seconds, the count an unbroken outage produces in {sustained_failure_seconds} seconds. Enough polls are still succeeding to keep the freshness and lag rules green, so gap recovery is partially dead rather than stopped; read the poll failure logs for the RPC error."
+                        "At least {failure_threshold} RPC polls failed in the last {RPC_POLL_FAILURE_WINDOW_SECONDS} seconds, the count an unbroken outage produces in {sustained_failure_seconds} seconds. Enough polls are still succeeding to keep the freshness and lag rules green, so gap recovery is partially dead rather than stopped; read the poll failure logs for the RPC error."
                     ),
                                     pending_seconds,
                 ),
@@ -1454,20 +1459,26 @@ mod tests {
             "increase(microscope_rpc_poll_failures_total[900s])"
         );
         assert_eq!(
-            default_interval["data"][2]["model"]["expression"], "$B > 9",
+            default_interval["data"][2]["model"]["expression"], "$B >= 9",
             "the polls forty-five seconds of unbroken failure costs at a five-second interval"
         );
         assert_eq!(default_interval["labels"]["severity"], "warning");
         assert_eq!(default_interval["noDataState"], "OK");
         assert_eq!(
             failing(300)["data"][2]["model"]["expression"],
-            "$B > 1",
-            "a poll interval longer than the sustained-failure duration still alerts"
+            "$B >= 1",
+            "a poll interval longer than the sustained-failure duration alerts on the first \
+             failure, the soonest one can be observed, rather than a poll later"
         );
         assert_eq!(
             failing_for(5, 600)["data"][2]["model"]["expression"],
-            "$B > 120",
+            "$B >= 120",
             "a provider given ten minutes to recover pages only after ten minutes of failure"
+        );
+        assert_eq!(
+            failing_for(10, 45)["data"][2]["model"]["expression"],
+            "$B >= 5",
+            "a duration the interval does not divide rounds up, so the rule never fires early"
         );
     }
 
