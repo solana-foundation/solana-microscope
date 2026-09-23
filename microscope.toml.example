@@ -27,6 +27,17 @@ idl_path = "idl/idl1.json"
 [alerting]
 lookback_window_seconds = 60
 evaluation_interval_seconds = 10
+# Health-alert timings. Omit each to take the default shown.
+# How long the RPC poller must fail without recovering before paging. Raise it
+# for a flakier provider. The rule divides this by the poll interval to get a
+# failure count, so it cannot exceed the 900-second window it counts over.
+# rpc_poll_sustained_failure_seconds = 45
+# How long a datasource health condition must hold before it notifies. Rules
+# backed by a log window cap this at half that window.
+# health_pending_period_seconds = 300
+# How long Squads activity matching another multisig keeps alerting, which has
+# to outlast the hours a proposal takes to be approved.
+# multisig_unmatched_window_seconds = 3600
 # Notifications link the matched transaction here. Append ?cluster=devnet for
 # devnet deployments, or point it at another explorer.
 explorer_transaction_url = "https://explorer.solana.com/tx/{signature}"

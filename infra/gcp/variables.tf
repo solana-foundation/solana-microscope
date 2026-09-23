@@ -239,6 +239,10 @@ variable "alerting" {
   type = object({
     lookback_window_seconds     = optional(number, 60)
     evaluation_interval_seconds = optional(number, 10)
+    # Unset defers to the indexer's own default.
+    rpc_poll_sustained_failure_seconds = optional(number)
+    health_pending_period_seconds      = optional(number)
+    multisig_unmatched_window_seconds  = optional(number)
   })
   default = {}
 
@@ -247,9 +251,13 @@ variable "alerting" {
       var.alerting.lookback_window_seconds > 0 &&
       var.alerting.evaluation_interval_seconds > 0 &&
       var.alerting.evaluation_interval_seconds % 10 == 0 &&
-      var.alerting.lookback_window_seconds >= var.alerting.evaluation_interval_seconds
+      var.alerting.lookback_window_seconds >= var.alerting.evaluation_interval_seconds &&
+      coalesce(var.alerting.rpc_poll_sustained_failure_seconds, 45) > 0 &&
+      coalesce(var.alerting.rpc_poll_sustained_failure_seconds, 45) <= 900 &&
+      coalesce(var.alerting.health_pending_period_seconds, 300) > 0 &&
+      coalesce(var.alerting.multisig_unmatched_window_seconds, 3600) > 0
     )
-    error_message = "alerting timings must be positive, evaluation_interval_seconds must be a multiple of 10, and lookback_window_seconds must be at least evaluation_interval_seconds."
+    error_message = "alerting timings must be positive, evaluation_interval_seconds must be a multiple of 10, lookback_window_seconds must be at least evaluation_interval_seconds, and rpc_poll_sustained_failure_seconds must be between 1 and 900."
   }
 }
 

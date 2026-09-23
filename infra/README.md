@@ -134,6 +134,10 @@ Check `bootstrap_log` when a revision does not apply.
 alerting = {
   lookback_window_seconds      = 60
   evaluation_interval_seconds = 10
+  # Health-alert timings. Omit any of them to take the indexer's default.
+  rpc_poll_sustained_failure_seconds = 45
+  health_pending_period_seconds      = 300
+  multisig_unmatched_window_seconds  = 3600
 }
 
 alerts = [
