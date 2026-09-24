@@ -26,6 +26,15 @@ multisig_fields = ${jsonencode(dashboard.multisig_fields)}
 [alerting]
 lookback_window_seconds = ${alerting.lookback_window_seconds}
 evaluation_interval_seconds = ${alerting.evaluation_interval_seconds}
+%{ if alerting.rpc_poll_sustained_failure_seconds != null ~}
+rpc_poll_sustained_failure_seconds = ${alerting.rpc_poll_sustained_failure_seconds}
+%{ endif ~}
+%{ if alerting.health_pending_period_seconds != null ~}
+health_pending_period_seconds = ${alerting.health_pending_period_seconds}
+%{ endif ~}
+%{ if alerting.multisig_unmatched_window_seconds != null ~}
+multisig_unmatched_window_seconds = ${alerting.multisig_unmatched_window_seconds}
+%{ endif ~}
 %{ for alert in alerts ~}
 
 [[alerts]]

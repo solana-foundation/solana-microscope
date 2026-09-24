@@ -34,20 +34,7 @@ const YELLOWSTONE_GAP_WINDOW_SECONDS: u64 = 600;
 /// Eight probes at the datasource's 15s interval, so a dropped dial does not
 /// page on its own but a provider that refuses every connection does.
 const YELLOWSTONE_PROBE_WINDOW_SECONDS: u64 = 120;
-const RPC_POLL_FAILURE_WINDOW_SECONDS: u64 = 900;
-/// Grafana honours the pending period for the Error state too, so a datasource
-/// that stays unreachable pages while a single failed evaluation does not. A
-/// rule pends only while its condition holds, so log windows cap this at half
-/// their length.
-const HEALTH_PENDING_PERIOD_SECONDS: u64 = 300;
-/// Multisig proposals are approved over hours, so a misconfigured vault has to
-/// stay alerting long enough to be noticed rather than resolving between
-/// instructions.
-const MULTISIG_UNMATCHED_WINDOW_SECONDS: u64 = 3600;
-/// A poller failing a share of its polls indefinitely leaves every freshness and
-/// lag rule green, so the rate itself has to be alertable. One in twenty sits
-/// above provider flakiness and below the share a broken request produces.
-const RPC_POLL_FAILURE_SHARE: u64 = 20;
+pub(crate) const RPC_POLL_FAILURE_WINDOW_SECONDS: u64 = 900;
 
 pub fn generate(config: &Config, output_dir: &Path) -> anyhow::Result<PathBuf> {
     let rpc_polling = config.datasource.mode == DatasourceMode::Rpc
@@ -154,36 +141,41 @@ fn provisioning_document(
     channels: &BTreeSet<AlertChannel>,
     rpc_polling: bool,
 ) -> anyhow::Result<Value> {
+    let pending_seconds = config.alerting.health_pending_period_seconds;
     let mut rules_by_interval = BTreeMap::<u64, Vec<Value>>::new();
     rules_by_interval
         .entry(RPC_HEALTH_EVALUATION_INTERVAL_SECONDS)
         .or_default()
-        .extend(rpc_recovery_degraded_rules(channels));
+        .extend(rpc_recovery_degraded_rules(channels, pending_seconds));
     rules_by_interval
         .entry(RPC_HEALTH_EVALUATION_INTERVAL_SECONDS)
         .or_default()
-        .extend(datasource_drop_rules(channels));
+        .extend(datasource_drop_rules(channels, pending_seconds));
     if config.datasource.mode == DatasourceMode::Yellowstone {
         rules_by_interval
             .entry(RPC_HEALTH_EVALUATION_INTERVAL_SECONDS)
             .or_default()
-            .extend(yellowstone_health_rules(channels));
+            .extend(yellowstone_health_rules(channels, pending_seconds));
     }
     rules_by_interval
         .entry(RPC_HEALTH_EVALUATION_INTERVAL_SECONDS)
         .or_default()
-        .extend(log_delivery_rules(channels));
+        .extend(log_delivery_rules(channels, pending_seconds));
     if config.multisig.is_some() {
         rules_by_interval
             .entry(RPC_HEALTH_EVALUATION_INTERVAL_SECONDS)
             .or_default()
-            .extend(multisig_health_rules(channels));
+            .extend(multisig_health_rules(
+                channels,
+                config.alerting.multisig_unmatched_window_seconds,
+                pending_seconds,
+            ));
     }
     if rpc_polling {
         rules_by_interval
             .entry(RPC_HEALTH_EVALUATION_INTERVAL_SECONDS)
             .or_default()
-            .extend(rpc_health_rules(config, channels));
+            .extend(rpc_health_rules(config, channels, pending_seconds));
     }
     for alert in &config.alert_rules {
         let rules = rules_by_interval
@@ -297,7 +289,10 @@ fn notification_settings(channel: &str) -> Option<Value> {
     (channel != "none").then(|| json!({ "receiver": format!("microscope-{channel}") }))
 }
 
-fn rpc_recovery_degraded_rules(channels: &BTreeSet<AlertChannel>) -> Vec<Value> {
+fn rpc_recovery_degraded_rules(
+    channels: &BTreeSet<AlertChannel>,
+    pending_seconds: u64,
+) -> Vec<Value> {
     health_channel_names(channels)
         .into_iter()
         .flat_map(|channel| {
@@ -312,6 +307,7 @@ fn rpc_recovery_degraded_rules(channels: &BTreeSet<AlertChannel>) -> Vec<Value> 
                     "rpc_recovery_disabled",
                     channel,
                     "RPC recovery disabled itself and stays off until the indexer restarts; the reason label on microscope_rpc_recovery_degraded says whether the cause was a checkpoint failure, exhausted provider history, or a cursor past the confirmed head. In Yellowstone mode the stack continues but gaps are no longer recovered; in RPC mode nothing is indexed at all.",
+                                    pending_seconds,
                 ),
                 prometheus_health_rule(
                     &format!("ms-rpc-checkpoint-corrupt-{channel}"),
@@ -323,13 +319,14 @@ fn rpc_recovery_degraded_rules(channels: &BTreeSet<AlertChannel>) -> Vec<Value> 
                     "rpc_checkpoint_corrupt",
                     channel,
                     "A corrupt RPC checkpoint was moved aside. Recovery restarted from the configured replay window; backfill may be required for older activity. This resolves once the quarantined rpc-polling.json.corrupt-* file is deleted.",
+                                    pending_seconds,
                 ),
             ]
         })
         .collect()
 }
 
-fn datasource_drop_rules(channels: &BTreeSet<AlertChannel>) -> Vec<Value> {
+fn datasource_drop_rules(channels: &BTreeSet<AlertChannel>, pending_seconds: u64) -> Vec<Value> {
     health_channel_names(channels)
         .into_iter()
         .map(|channel| {
@@ -346,12 +343,13 @@ fn datasource_drop_rules(channels: &BTreeSet<AlertChannel>) -> Vec<Value> {
                 "datasource_updates_dropped",
                 channel,
                 "The Yellowstone datasource discarded a monitored update because the channel it forwards into was full; the signature is in the log line. With RPC_URL configured the poller re-delivers it within the replay window, so confirm the transaction was indexed rather than treating it as lost. Without RPC_URL the transaction is lost and that slot needs a backfill.",
+                            pending_seconds,
             )
         })
         .collect()
 }
 
-fn yellowstone_health_rules(channels: &BTreeSet<AlertChannel>) -> Vec<Value> {
+fn yellowstone_health_rules(channels: &BTreeSet<AlertChannel>, pending_seconds: u64) -> Vec<Value> {
     health_channel_names(channels)
         .into_iter()
         .flat_map(|channel| {
@@ -369,6 +367,7 @@ fn yellowstone_health_rules(channels: &BTreeSet<AlertChannel>) -> Vec<Value> {
                     "yellowstone_stream_interrupted",
                     channel,
                     "The Yellowstone stream closed, timed out, or could not resubscribe more than five times in fifteen minutes. No on-chain activity is observed while this fires, and the indexer resumes at the stream head, so the interrupted interval is lost unless RPC_URL is configured.",
+                                    pending_seconds,
                 ),
                 prometheus_health_rule(
                     &format!("ms-yellowstone-gap-{channel}"),
@@ -380,6 +379,7 @@ fn yellowstone_health_rules(channels: &BTreeSet<AlertChannel>) -> Vec<Value> {
                     "yellowstone_gap_unrecovered",
                     channel,
                     "The Yellowstone stream reconnected at the provider's current head after a disconnect while RPC recovery is not replaying the gap, either because RPC_URL is unset or because recovery disabled itself (see the RPC recovery disabled alert). The transactions in the gap will never be indexed. microscope_yellowstone_missed_slots_total gives the size of the gap; backfill this interval.",
+                                    pending_seconds,
                 ),
                 prometheus_health_rule(
                     &format!("ms-yellowstone-unreachable-{channel}"),
@@ -391,13 +391,14 @@ fn yellowstone_health_rules(channels: &BTreeSet<AlertChannel>) -> Vec<Value> {
                     "yellowstone_endpoint_unreachable",
                     channel,
                     "Every probe of the Yellowstone endpoint failed, so the datasource cannot establish a stream. The disconnect and missed-slot counters stay flat throughout, because they only move once an established stream goes silent, so this is the only metric that shows a provider refusing connections. No data also alerts here: the probe gauge is seeded at startup, so its absence means the indexer is gone.",
+                                    pending_seconds,
                 ),
             ]
         })
         .collect()
 }
 
-fn log_delivery_rules(channels: &BTreeSet<AlertChannel>) -> Vec<Value> {
+fn log_delivery_rules(channels: &BTreeSet<AlertChannel>, pending_seconds: u64) -> Vec<Value> {
     health_channel_names(channels)
         .into_iter()
         .map(|channel| {
@@ -411,12 +412,17 @@ fn log_delivery_rules(channels: &BTreeSet<AlertChannel>) -> Vec<Value> {
                 "log_delivery_stalled",
                 channel,
                 "The indexer decoded transactions but Alloy shipped no log entries. Decoded records are not reaching Loki, so every activity alert evaluates against an empty stream and stays silent.",
+                            pending_seconds,
             )
         })
         .collect()
 }
 
-fn multisig_health_rules(channels: &BTreeSet<AlertChannel>) -> Vec<Value> {
+fn multisig_health_rules(
+    channels: &BTreeSet<AlertChannel>,
+    window_seconds: u64,
+    pending_seconds: u64,
+) -> Vec<Value> {
     health_channel_names(channels)
         .into_iter()
         .map(|channel| {
@@ -424,7 +430,7 @@ fn multisig_health_rules(channels: &BTreeSet<AlertChannel>) -> Vec<Value> {
                 &format!("ms-multisig-unmatched-{channel}"),
                 &format!("Squads activity for another multisig [{channel}]"),
                 &format!(
-                    "max(increase(microscope_multisig_unmatched_state_total[{MULTISIG_UNMATCHED_WINDOW_SECONDS}s]))"
+                    "max(increase(microscope_multisig_unmatched_state_total[{window_seconds}s]))"
                 ),
                 "$B > 0",
                 "OK",
@@ -432,18 +438,28 @@ fn multisig_health_rules(channels: &BTreeSet<AlertChannel>) -> Vec<Value> {
                 "multisig_unmatched_state",
                 channel,
                 "Squads instructions decoded but referenced a different internal state account than the configured one, so no multisig activity was recorded for the configured vault. The multisig.state_address or multisig.version is wrong for this vault. Without this alert a misconfigured vault is indistinguishable from an idle one: both leave the multisig panels empty.",
+                            pending_seconds,
             )
         })
         .collect()
 }
 
-fn rpc_health_rules(config: &Config, channels: &BTreeSet<AlertChannel>) -> Vec<Value> {
+fn rpc_health_rules(
+    config: &Config,
+    channels: &BTreeSet<AlertChannel>,
+    pending_seconds: u64,
+) -> Vec<Value> {
     let channel_names = health_channel_names(channels);
     let stale_after_seconds = config.datasource.rpc_poll_stale_after_seconds();
     let lag_threshold_slots = config.datasource.replay_window_slots.saturating_mul(2);
-    let failure_threshold = (RPC_POLL_FAILURE_WINDOW_SECONDS
-        / config.datasource.poll_interval_seconds.max(1)
-        / RPC_POLL_FAILURE_SHARE)
+    let sustained_failure_seconds = config.alerting.rpc_poll_sustained_failure_seconds;
+    let poll_interval_seconds = config.datasource.poll_interval_seconds.max(1);
+    // Rounding up, and comparing with `>=`, so the rule fires on the poll that
+    // completes the configured duration rather than the one after it. A
+    // duration below the interval still costs a whole poll, which is the
+    // soonest a failure can be observed at all.
+    let failure_threshold = sustained_failure_seconds
+        .div_ceil(poll_interval_seconds)
         .max(1);
     channel_names
         .into_iter()
@@ -461,6 +477,7 @@ fn rpc_health_rules(config: &Config, channels: &BTreeSet<AlertChannel>) -> Vec<V
                     &format!(
                         "No RPC poll has completed successfully within {stale_after_seconds} seconds."
                     ),
+                                    pending_seconds,
                 ),
                 prometheus_health_rule(
                     &format!("ms-rpc-poll-lag-{channel}"),
@@ -474,6 +491,7 @@ fn rpc_health_rules(config: &Config, channels: &BTreeSet<AlertChannel>) -> Vec<V
                     &format!(
                         "RPC polling cursors trail the confirmed head by more than {lag_threshold_slots} slots (twice the replay window). Polls are succeeding but transactions are not being decoded; check for unfetchable transactions or provider history gaps."
                     ),
+                                    pending_seconds,
                 ),
                 prometheus_health_rule(
                     &format!("ms-rpc-poll-failing-{channel}"),
@@ -481,14 +499,15 @@ fn rpc_health_rules(config: &Config, channels: &BTreeSet<AlertChannel>) -> Vec<V
                     &format!(
                         "increase(microscope_rpc_poll_failures_total[{RPC_POLL_FAILURE_WINDOW_SECONDS}s])"
                     ),
-                    &format!("$B > {failure_threshold}"),
+                    &format!("$B >= {failure_threshold}"),
                     "OK",
                     "warning",
                     "rpc_poll_failing",
                     channel,
                     &format!(
-                        "More than {failure_threshold} RPC polls failed in the last {RPC_POLL_FAILURE_WINDOW_SECONDS} seconds. Enough polls are still succeeding to keep the freshness and lag rules green, so gap recovery is partially dead rather than stopped; read the poll failure logs for the RPC error."
+                        "At least {failure_threshold} RPC polls failed in the last {RPC_POLL_FAILURE_WINDOW_SECONDS} seconds, the count an unbroken outage produces in {sustained_failure_seconds} seconds. Enough polls are still succeeding to keep the freshness and lag rules green, so gap recovery is partially dead rather than stopped; read the poll failure logs for the RPC error."
                     ),
+                                    pending_seconds,
                 ),
                 prometheus_health_rule(
                     &format!("ms-rpc-checkpoint-stale-{channel}"),
@@ -502,6 +521,7 @@ fn rpc_health_rules(config: &Config, channels: &BTreeSet<AlertChannel>) -> Vec<V
                     &format!(
                         "No RPC recovery checkpoint has been written within {CHECKPOINT_STALE_AFTER_SECONDS} seconds. Polling continues, but a restart would resume from a stale cursor and re-fetch or miss the uncheckpointed window."
                     ),
+                                    pending_seconds,
                 ),
                 prometheus_health_rule(
                     &format!("ms-rpc-quarantine-{channel}"),
@@ -513,6 +533,7 @@ fn rpc_health_rules(config: &Config, channels: &BTreeSet<AlertChannel>) -> Vec<V
                     "rpc_transaction_quarantined",
                     channel,
                     "RPC transactions were skipped after bounded fetch or conversion failures.",
+                                    pending_seconds,
                 ),
             ]
         })
@@ -530,6 +551,7 @@ fn prometheus_health_rule(
     signal_name: &str,
     channel: &str,
     description: &str,
+    pending_seconds: u64,
 ) -> Value {
     health_rule(
         uid,
@@ -552,7 +574,7 @@ fn prometheus_health_rule(
             },
         }),
         condition,
-        HEALTH_PENDING_PERIOD_SECONDS,
+        pending_seconds,
         no_data_state,
         severity,
         signal_name,
@@ -572,6 +594,7 @@ fn loki_health_rule(
     signal_name: &str,
     channel: &str,
     description: &str,
+    pending_seconds: u64,
 ) -> Value {
     health_rule(
         uid,
@@ -592,7 +615,7 @@ fn loki_health_rule(
             },
         }),
         condition,
-        HEALTH_PENDING_PERIOD_SECONDS.min(window_seconds / 2),
+        pending_seconds.min(window_seconds / 2),
         "OK",
         severity,
         signal_name,
@@ -1385,12 +1408,34 @@ mod tests {
     }
 
     #[test]
+    fn alerting_timings_follow_the_configured_overrides() {
+        let channels = BTreeSet::from([AlertChannel::Slack]);
+        let mut config = config(vec![]);
+        config.alerting.health_pending_period_seconds = 600;
+        config.alerting.multisig_unmatched_window_seconds = 7200;
+        let document = provisioning_document(&config, &channels, false).unwrap();
+
+        let multisig = health_rule(&document, "ms-multisig-unmatched-slack").unwrap();
+        assert_eq!(
+            multisig["data"][0]["model"]["expr"],
+            "max(increase(microscope_multisig_unmatched_state_total[7200s]))"
+        );
+        assert_eq!(multisig["for"], "600s");
+        assert_eq!(
+            health_rule(&document, "ms-datasource-drop-slack").unwrap()["for"],
+            "60s",
+            "a log-backed rule still caps the pending period at half its window"
+        );
+    }
+
+    #[test]
     fn alerts_on_a_share_of_failing_polls_the_freshness_rules_cannot_see() {
         let channels = BTreeSet::from([AlertChannel::Slack]);
-        let failing = |poll_interval_seconds| {
+        let failing_for = |poll_interval_seconds, sustained_failure_seconds| {
             let mut config = config(vec![]);
             config.datasource.mode = DatasourceMode::Rpc;
             config.datasource.poll_interval_seconds = poll_interval_seconds;
+            config.alerting.rpc_poll_sustained_failure_seconds = sustained_failure_seconds;
             let document = provisioning_document(&config, &channels, true).unwrap();
             document["groups"]
                 .as_array()
@@ -1401,6 +1446,12 @@ mod tests {
                 .cloned()
                 .expect("a failing poller is alertable")
         };
+        let failing = |poll_interval_seconds| {
+            failing_for(
+                poll_interval_seconds,
+                AlertingConfig::default().rpc_poll_sustained_failure_seconds,
+            )
+        };
 
         let default_interval = failing(5);
         assert_eq!(
@@ -1408,15 +1459,26 @@ mod tests {
             "increase(microscope_rpc_poll_failures_total[900s])"
         );
         assert_eq!(
-            default_interval["data"][2]["model"]["expression"], "$B > 9",
-            "one in twenty of the 180 polls expected in the window"
+            default_interval["data"][2]["model"]["expression"], "$B >= 9",
+            "the polls forty-five seconds of unbroken failure costs at a five-second interval"
         );
         assert_eq!(default_interval["labels"]["severity"], "warning");
         assert_eq!(default_interval["noDataState"], "OK");
         assert_eq!(
             failing(300)["data"][2]["model"]["expression"],
-            "$B > 1",
-            "a poll interval that fits fewer than twenty polls in the window still alerts"
+            "$B >= 1",
+            "a poll interval longer than the sustained-failure duration alerts on the first \
+             failure, the soonest one can be observed, rather than a poll later"
+        );
+        assert_eq!(
+            failing_for(5, 600)["data"][2]["model"]["expression"],
+            "$B >= 120",
+            "a provider given ten minutes to recover pages only after ten minutes of failure"
+        );
+        assert_eq!(
+            failing_for(10, 45)["data"][2]["model"]["expression"],
+            "$B >= 5",
+            "a duration the interval does not divide rounds up, so the rule never fires early"
         );
     }
 

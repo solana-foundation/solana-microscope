@@ -10,7 +10,7 @@ use heck::ToSnakeCase;
 use serde::{Deserialize, Serialize};
 use solana_pubkey::Pubkey;
 
-use crate::multisig::action_names;
+use crate::{alerting::RPC_POLL_FAILURE_WINDOW_SECONDS, multisig::action_names};
 
 const GRAFANA_SCHEDULER_INTERVAL_SECONDS: u64 = 10;
 const MIN_RPC_POLL_INTERVAL_SECONDS: u64 = 1;
@@ -199,6 +199,21 @@ pub struct AlertingConfig {
     pub evaluation_interval_seconds: u64,
     /// `{signature}` is replaced with the matched transaction's signature.
     pub explorer_transaction_url: String,
+    /// A poller failing a share of its polls indefinitely leaves every
+    /// freshness and lag rule green, so the failure count itself has to be
+    /// alertable. How long a provider stays broken before that count pages
+    /// depends on the provider, so the duration is the knob rather than the
+    /// count: the rule divides it by the poll interval.
+    pub rpc_poll_sustained_failure_seconds: u64,
+    /// Grafana honours the pending period for the Error state too, so a
+    /// datasource that stays unreachable pages while a single failed
+    /// evaluation does not. A rule pends only while its condition holds, so
+    /// log-backed rules cap this at half their window.
+    pub health_pending_period_seconds: u64,
+    /// Multisig proposals are approved over hours, so a misconfigured vault has
+    /// to stay alerting long enough to be noticed rather than resolving between
+    /// instructions.
+    pub multisig_unmatched_window_seconds: u64,
 }
 
 impl Default for AlertingConfig {
@@ -207,6 +222,9 @@ impl Default for AlertingConfig {
             lookback_window_seconds: 60,
             evaluation_interval_seconds: 10,
             explorer_transaction_url: "https://explorer.solana.com/tx/{signature}".to_string(),
+            rpc_poll_sustained_failure_seconds: 45,
+            health_pending_period_seconds: 300,
+            multisig_unmatched_window_seconds: 3600,
         }
     }
 }
@@ -388,6 +406,20 @@ impl Config {
             self.alerting.evaluation_interval_seconds,
         )
         .context("invalid alerting defaults")?;
+
+        if !(1..=RPC_POLL_FAILURE_WINDOW_SECONDS)
+            .contains(&self.alerting.rpc_poll_sustained_failure_seconds)
+        {
+            bail!(
+                "alerting.rpc_poll_sustained_failure_seconds must be between 1 and {RPC_POLL_FAILURE_WINDOW_SECONDS}, the window the rule counts failures over"
+            );
+        }
+        if self.alerting.health_pending_period_seconds == 0 {
+            bail!("alerting.health_pending_period_seconds must be greater than zero");
+        }
+        if self.alerting.multisig_unmatched_window_seconds == 0 {
+            bail!("alerting.multisig_unmatched_window_seconds must be greater than zero");
+        }
 
         validate_dashboard_fields("event_fields", &self.dashboard.event_fields)?;
         validate_dashboard_fields("multisig_fields", &self.dashboard.multisig_fields)?;
