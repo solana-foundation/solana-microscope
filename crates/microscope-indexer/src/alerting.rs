@@ -911,16 +911,39 @@ fn condition_description(condition: &AlertCondition) -> anyhow::Result<String> {
     ))
 }
 
+/// Grafana renames a health rule it cannot query to `DatasourceError`, and its
+/// default title then reads as a fault in the indexer's own datasource.
+const EVALUATION_ERROR_TITLE: &str = concat!(
+    "[{{ .Status | toUpper }}{{ if eq .Status \"firing\" }}:{{ .Alerts.Firing | len }}{{ end }}] ",
+    "Grafana could not evaluate Microscope health rules",
+    "{{ with .CommonLabels.deployment }} ({{ . }}){{ end }}",
+);
+
+fn titled_on_evaluation_error(default_template: &str) -> String {
+    format!(
+        "{{{{ if eq .CommonLabels.alertname \"DatasourceError\" }}}}{EVALUATION_ERROR_TITLE}\
+         {{{{ else }}}}{{{{ template \"{default_template}\" . }}}}{{{{ end }}}}"
+    )
+}
+
 fn contact_point(channel: AlertChannel) -> Value {
     let settings = match channel {
-        AlertChannel::Slack => json!({ "url": "$SLACK_WEBHOOK_URL" }),
+        AlertChannel::Slack => json!({
+            "url": "$SLACK_WEBHOOK_URL",
+            "title": titled_on_evaluation_error("slack.default.title"),
+        }),
         AlertChannel::Telegram => json!({
             "bottoken": "$TELEGRAM_BOT_TOKEN",
             "chatid": "$TELEGRAM_CHAT_ID",
+            "message": format!(
+                "{{{{ if eq .CommonLabels.alertname \"DatasourceError\" }}}}{EVALUATION_ERROR_TITLE}\n\
+                 {{{{ end }}}}{{{{ template \"telegram.default.message\" . }}}}"
+            ),
         }),
         AlertChannel::Pagerduty => json!({
             "integrationKey": "$PAGERDUTY_INTEGRATION_KEY",
             "severity": "{{ .CommonLabels.severity }}",
+            "summary": titled_on_evaluation_error("pagerduty.default.description"),
         }),
     };
 
@@ -1642,6 +1665,45 @@ mod tests {
                 rule["notification_settings"]["receiver"], "microscope-slack",
                 "{}",
                 rule["title"]
+            );
+        }
+    }
+
+    /// A health rule Grafana cannot query notifies as `DatasourceError`, which an
+    /// operator reads as the indexer's own datasource failing.
+    #[test]
+    fn titles_evaluation_errors_on_every_channel_and_keeps_grafana_defaults_otherwise() {
+        let channels = BTreeSet::from([
+            AlertChannel::Slack,
+            AlertChannel::Telegram,
+            AlertChannel::Pagerduty,
+        ]);
+        let document = provisioning_document(&config(vec![]), &channels, false).unwrap();
+        let settings = |name: &str| {
+            document["contactPoints"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|point| point["name"] == name)
+                .map(|point| point["receivers"][0]["settings"].clone())
+                .expect("contact point is generated")
+        };
+
+        for (name, field, default) in [
+            ("microscope-slack", "title", "slack.default.title"),
+            ("microscope-telegram", "message", "telegram.default.message"),
+            (
+                "microscope-pagerduty",
+                "summary",
+                "pagerduty.default.description",
+            ),
+        ] {
+            let template = settings(name)[field].as_str().unwrap().to_string();
+            assert!(
+                template.contains("{{ if eq .CommonLabels.alertname \"DatasourceError\" }}")
+                    && template.contains("Grafana could not evaluate Microscope health rules")
+                    && template.contains(&format!("{{{{ template \"{default}\" . }}}}")),
+                "{name}: {template}"
             );
         }
     }
