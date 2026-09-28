@@ -149,13 +149,21 @@ service or a timeout reaching Prometheus or Loki.
 Check where the query failed, then confirm the indexer directly:
 
 - Grafana Cloud: [status.grafana.com](https://status.grafana.com) for the
-  stack's region. Every rule on the stack fails at once, not only Microscope's.
+  stack's region. Rules outside Microscope failing too put the fault in
+  Grafana.
 - Local stack: `docker compose ps` for `prometheus`, `loki`, and `grafana`.
 - Either: `curl -s localhost:9091/readyz` on the indexer host, and
   `microscope_yellowstone_probe_healthy` and
   `microscope_rpc_poll_last_success_unixtime` on `localhost:9090/metrics`.
 
 An evaluation failure alone loses nothing: the indexer keeps indexing, and the
-alert resolves once the rules evaluate again. If Loki also refused writes over
-the same period, the records are covered by `log_delivery_stalled` instead. While it lasts, every health and activity alert is
-blind, and if Grafana stops evaluating altogether nothing notifies at all.
+alert resolves once the rules evaluate again. Only the rules whose queries fail
+are blind. The `rulename` labels and each rule's datasource say which: Loki
+failing silences the activity alerts and the Loki-backed health alerts while
+the Prometheus ones still fire, and if Grafana stops evaluating altogether
+nothing notifies at all.
+
+`log_delivery_stalled` is one of the rules that can be blind, so it cannot
+vouch for the records written during the outage. Once Grafana answers again,
+query `{service_name="microscope-indexer"}` in Loki over that window, with
+`deployment="<MICROSCOPE_DEPLOYMENT>"` on a shared stack, and backfill any gap.

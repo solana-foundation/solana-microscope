@@ -51,7 +51,7 @@ Step 4 of the procedure requires an explicit answer. Classify by alert:
 | `rpc_poll_stale`, `rpc_poll_failing`, `rpc_poll_lag` | Not directly. Gap recovery is degraded, so an outage overlapping this becomes loss |
 | `rpc_checkpoint_stale` | Not while running. A restart resumes from a stale cursor and re-fetches or misses the uncheckpointed window |
 | `multisig_unmatched_state` | No. This is a configuration fault: nothing was recorded for the configured vault because the config names the wrong account |
-| `DatasourceError` | No. Grafana failed to query, the indexer kept indexing. Every alert was blind for the duration, so confirm the indexer's own metrics for that window |
+| `DatasourceError` | No. Grafana failed to query, the indexer kept indexing. Every rule whose query failed was blind for the duration, `log_delivery_stalled` included, so confirm the indexer's own metrics and the Loki records for that window |
 
 ## Remediation
 
