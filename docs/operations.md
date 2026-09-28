@@ -137,3 +137,25 @@ Grafana reads alert provisioning only at startup. `just up` recreates it, plain
 ```sh
 docker compose up --detach --no-deps --force-recreate grafana
 ```
+
+### Grafana could not evaluate Microscope health rules
+
+Grafana sends this, as alert name `DatasourceError`, when a health rule's query
+fails inside Grafana. It says nothing about the Yellowstone or RPC datasource:
+the labels are the failing rule's, but the rule never ran. The `Error`
+annotation carries Grafana's reason, such as a `500` or `429` from its query
+service or a timeout reaching Prometheus or Loki.
+
+Check where the query failed, then confirm the indexer directly:
+
+- Grafana Cloud: [status.grafana.com](https://status.grafana.com) for the
+  stack's region. Every rule on the stack fails at once, not only Microscope's.
+- Local stack: `docker compose ps` for `prometheus`, `loki`, and `grafana`.
+- Either: `curl -s localhost:9091/readyz` on the indexer host, and
+  `microscope_yellowstone_probe_healthy` and
+  `microscope_rpc_poll_last_success_unixtime` on `localhost:9090/metrics`.
+
+An evaluation failure alone loses nothing: the indexer keeps indexing, and the
+alert resolves once the rules evaluate again. If Loki also refused writes over
+the same period, the records are covered by `log_delivery_stalled` instead. While it lasts, every health and activity alert is
+blind, and if Grafana stops evaluating altogether nothing notifies at all.
