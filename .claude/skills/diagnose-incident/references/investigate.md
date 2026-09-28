@@ -31,6 +31,14 @@ In Grafana Cloud mode, query the hosted stack for anything historical, and use t
 
 If the stack is unreachable, say the diagnosis is unconfirmed. Do not present a plausible cause as an established one.
 
+## Is Grafana evaluating
+
+A `DatasourceError` notification, or silence during an incident, can be Grafana's fault rather than the indexer's. Separate the two before anything else:
+
+- Rule health: in Grafana, Alerting > Alert rules, or `gcx alert rules list -o json` for a Grafana Cloud stack. `health = error` with the failure in `lastError` means the query failed; a `lastEvaluation` that stops advancing means the evaluator itself stopped, and no alert on the stack can fire.
+- Scope: every rule on the stack failing at once, not only Microscope's, puts the fault in Grafana. In Grafana Cloud check [status.grafana.com](https://status.grafana.com) for the stack's region; in the local stack check `docker compose ps` for `prometheus`, `loki`, and `grafana`.
+- The indexer: `/readyz` and the metrics below come from the indexer directly, not through Grafana, so they answer whether anything was missed while the rules were down.
+
 ## `/readyz`
 
 Returns 503 with the reason. It gates on three things: startup finished, an RPC poll succeeded within the stale threshold (skipped when no poller is configured), and a Yellowstone endpoint probe succeeded within its threshold (armed only in Yellowstone mode). A 503 naming the stream probe and a firing `yellowstone_endpoint_unreachable` are the same fact.
