@@ -158,12 +158,15 @@ Check where the query failed, then confirm the indexer directly:
 
 An evaluation failure alone loses nothing: the indexer keeps indexing, and the
 alert resolves once the rules evaluate again. Only the rules whose queries fail
-are blind. The `rulename` labels and each rule's datasource say which: Loki
-failing silences the activity alerts and the Loki-backed health alerts while
-the Prometheus ones still fire, and if Grafana stops evaluating altogether
+are blind, and the `rulename` labels say which. When only Loki fails, the
+Loki-backed health rules send `DatasourceError` in place of their own signal,
+the activity alerts go silent without notifying, and the Prometheus-backed
+health rules still fire normally. If Grafana stops evaluating altogether,
 nothing notifies at all.
 
 `log_delivery_stalled` is one of the rules that can be blind, so it cannot
 vouch for the records written during the outage. Once Grafana answers again,
 query `{service_name="microscope-indexer"}` in Loki over that window, with
-`deployment="<MICROSCOPE_DEPLOYMENT>"` on a shared stack, and backfill any gap.
+`deployment="<MICROSCOPE_DEPLOYMENT>"` on a shared stack. Backfill only the
+interval with no records: a window overlapping indexed activity duplicates
+rows in the event tables.
