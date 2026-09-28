@@ -23,7 +23,7 @@ The definitions and their thresholds live in `crates/microscope-indexer/src/aler
 
 ## Precedence
 
-A notification titled "Grafana could not evaluate Microscope health rules", alert name `DatasourceError`, comes before this list: the rule named in its labels never ran, so it is not that signal firing. Rule out the evaluator before reading any other alert (`references/investigate.md`, "Is Grafana evaluating").
+A `DatasourceError` notification comes before this list: the rule named in its labels never ran, so it is not that signal firing. Rule out the evaluator before reading any other alert (`references/investigate.md`, "Is Grafana evaluating").
 
 Diagnose downward. An alert lower in this list is usually a symptom of one higher up, and reporting it as an independent fault is the most common wrong answer.
 
@@ -65,6 +65,6 @@ Step 4 of the procedure requires an explicit answer. Classify by alert:
 | `yellowstone_endpoint_unreachable`, `yellowstone_stream_interrupted` | Datasource endpoints |
 | Any alert the operator says never fires | An alert never fires |
 | Any alert Grafana is still evaluating after a config change | Grafana still evaluates the old alerts |
-| `DatasourceError` | Grafana could not evaluate Microscope health rules |
+| `DatasourceError` | A `DatasourceError` alert fires |
 
 Neither quarantine alert clears on restart; both need the operator to remove state by hand.

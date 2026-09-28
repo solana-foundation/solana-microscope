@@ -138,13 +138,13 @@ Grafana reads alert provisioning only at startup. `just up` recreates it, plain
 docker compose up --detach --no-deps --force-recreate grafana
 ```
 
-### Grafana could not evaluate Microscope health rules
+### A `DatasourceError` alert fires
 
-Grafana sends this, as alert name `DatasourceError`, when a health rule's query
-fails inside Grafana. It says nothing about the Yellowstone or RPC datasource:
-the labels are the failing rule's, but the rule never ran. The `Error`
-annotation carries Grafana's reason, such as a `500` or `429` from its query
-service or a timeout reaching Prometheus or Loki.
+Grafana sends this when a health rule's query fails inside Grafana. It says
+nothing about the Yellowstone or RPC datasource: the labels are the failing
+rule's, but the rule never ran. The `Error` annotation carries Grafana's
+reason, such as a `500` or `429` from its query service or a timeout reaching
+Prometheus or Loki.
 
 Check where the query failed, then confirm the indexer directly:
 
