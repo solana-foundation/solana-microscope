@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    env, fs,
+    fs,
     path::{Path, PathBuf},
 };
 
@@ -8,7 +8,7 @@ use anyhow::{anyhow, Context};
 use heck::ToTitleCase;
 use serde_json::{json, Value};
 
-use crate::config::{Config, DatasourceMode};
+use crate::{config::Config, files};
 
 const OVERVIEW_TEMPLATE: &str = include_str!("../../../grafana/dashboard-templates/overview.json");
 pub const OVERVIEW_UID: &str = "microscope-overview";
@@ -23,8 +23,7 @@ const RPC_HEAD_SLOT_PANEL_ID: u64 = 13;
 const RPC_ACTIVITY_PANEL_ID: u64 = 14;
 
 pub fn generate(config: &Config, output_dir: &Path) -> anyhow::Result<PathBuf> {
-    let rpc_polling = config.datasource.mode == DatasourceMode::Rpc
-        || env::var("RPC_URL").is_ok_and(|url| !url.trim().is_empty());
+    let rpc_polling = config.datasource.polls_rpc();
     let document = overview_document(config, rpc_polling)?;
     fs::create_dir_all(output_dir).with_context(|| {
         format!(
@@ -34,12 +33,7 @@ pub fn generate(config: &Config, output_dir: &Path) -> anyhow::Result<PathBuf> {
     })?;
 
     let output = output_dir.join("overview.json");
-    let temporary = output_dir.join(".overview.json.tmp");
-    let contents = serde_json::to_vec_pretty(&document)?;
-    fs::write(&temporary, contents)
-        .with_context(|| format!("writing temporary dashboard {}", temporary.display()))?;
-    fs::rename(&temporary, &output)
-        .with_context(|| format!("installing dashboard {}", output.display()))?;
+    files::replace(&output, &serde_json::to_vec_pretty(&document)?, "dashboard")?;
 
     Ok(output)
 }
@@ -60,7 +54,7 @@ fn overview_document(config: &Config, rpc_polling: bool) -> anyhow::Result<Value
             &config.dashboard.event_fields,
             "event_field",
             "program_event",
-            Some(("program_id", &config.program_id)),
+            ("program_id", &config.program_id),
             "Decoded program events for the configured program. Missing configured fields display as a placeholder.",
         );
     }
@@ -75,7 +69,7 @@ fn overview_document(config: &Config, rpc_polling: bool) -> anyhow::Result<Value
             &config.dashboard.multisig_fields,
             "multisig_field",
             "multisig_activity",
-            Some(("vault_address", multisig.vault_address.as_str())),
+            ("vault_address", multisig.vault_address.as_str()),
             "Squads multisig activity for the configured vault. Missing configured fields display as a placeholder.",
         );
     }
@@ -241,7 +235,7 @@ fn configure_table_panel(
     fields: &[String],
     field_prefix: &str,
     record_kind: &str,
-    scope: Option<(&str, &str)>,
+    (scope_path, scope_value): (&str, &str),
     description: &str,
 ) {
     let json_paths = fields
@@ -288,17 +282,11 @@ fn configure_table_panel(
         "showHeader": true,
         "sortBy": [{ "desc": true, "displayName": "Time" }],
     });
-    let (scope_label, scope_filter) = match scope {
-        Some((path, value)) => (
-            format!(", scope=\"{path}\""),
-            format!(" | scope = {}", json!(value)),
-        ),
-        None => (String::new(), String::new()),
-    };
+    let scope_filter = json!(scope_value);
     panel["targets"] = json!([{
         "datasource": { "type": "loki", "uid": "loki" },
         "editorMode": "code",
-        "expr": format!("{{service_name=\"microscope-indexer\"}} | json kind=\"kind\"{scope_label} | kind = \"{record_kind}\"{scope_filter} | __error__ = \"\""),
+        "expr": format!("{{service_name=\"microscope-indexer\"}} | json kind=\"kind\", scope=\"{scope_path}\" | kind = \"{record_kind}\" | scope = {scope_filter} | __error__ = \"\""),
         "queryType": "range",
         "refId": "A",
     }]);
@@ -362,10 +350,7 @@ fn collision_safe_display_names(paths: &[String]) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use crate::config::{
-        AlertingConfig, Config, DashboardConfig, DatasourceConfig, DatasourceMode, MultisigConfig,
-        MultisigVersion,
-    };
+    use crate::config::{Config, DashboardConfig, DatasourceMode};
     use serde_json::json;
 
     use super::{
@@ -375,20 +360,11 @@ mod tests {
 
     fn config(event_fields: &[&str]) -> Config {
         Config {
-            program_id: "11111111111111111111111111111111".to_string(),
-            idl_path: "Cargo.toml".to_string(),
-            multisig: Some(MultisigConfig {
-                vault_address: "11111111111111111111111111111111".to_string(),
-                state_address: "11111111111111111111111111111111".to_string(),
-                version: MultisigVersion::V4,
-            }),
-            datasource: DatasourceConfig::default(),
-            alerting: AlertingConfig::default(),
             dashboard: DashboardConfig {
                 event_fields: event_fields.iter().map(|field| field.to_string()).collect(),
                 ..DashboardConfig::default()
             },
-            alert_rules: vec![],
+            ..crate::test_support::config()
         }
     }
 
@@ -636,8 +612,9 @@ mod tests {
     #[test]
     fn adds_rpc_polling_health_panels_alongside_yellowstone_recovery() {
         let config = config(&["name"]);
+        let rpc_polling = config.datasource.polls_rpc_with(Some("http://rpc.test"));
 
-        let dashboard = overview_document(&config, true).expect("dashboard generates");
+        let dashboard = overview_document(&config, rpc_polling).expect("dashboard generates");
 
         assert_eq!(config.datasource.mode, DatasourceMode::Yellowstone);
         assert!(dashboard["panels"]

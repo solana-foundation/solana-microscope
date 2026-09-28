@@ -7,6 +7,7 @@ mod datasource;
 mod delivered;
 #[cfg(program_events)]
 mod events;
+mod files;
 mod health;
 mod instructions;
 mod logging;
@@ -15,6 +16,8 @@ mod processor;
 mod rpc_polling;
 mod shipped;
 mod telemetry;
+#[cfg(test)]
+mod test_support;
 
 use std::{path::Path, sync::Arc, time::Duration};
 
@@ -41,6 +44,13 @@ const BUILD_IDL_SHA256: &str = include_str!("../../program-decoder/.microscope-i
 // reqwest's `rustls-no-provider` ships none, and Err means one is already installed.
 pub(crate) fn install_crypto_provider() {
     let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
+fn load_config(config_path: &Path) -> Config {
+    let config = Config::load(config_path)
+        .unwrap_or_else(|err| panic!("failed to load config {}: {err:?}", config_path.display()));
+    verify_decoder_target(&config, config_path);
+    config
 }
 
 fn verify_decoder_target(config: &Config, config_path: &Path) {
@@ -108,10 +118,8 @@ fn with_instruction_pipes(
     }
 }
 
-fn verify_configured_multisig(config: &Config) -> anyhow::Result<Option<VerifiedMultisig>> {
-    let Some(multisig_config) = config.multisig.as_ref() else {
-        return Ok(None);
-    };
+fn verify_configured_multisig(config: &Config) -> Option<VerifiedMultisig> {
+    let multisig_config = config.multisig.as_ref()?;
     let verified = multisig::verify(
         config
             .multisig_vault_pubkey()
@@ -120,14 +128,15 @@ fn verify_configured_multisig(config: &Config) -> anyhow::Result<Option<Verified
             .multisig_state_pubkey()
             .expect("the multisig section is present and validated"),
         multisig_config.version,
-    )?;
+    )
+    .unwrap_or_else(|error| panic!("invalid configured multisig: {error:#}"));
     log::info!(
         "verified configured Squads {} vault {} and state account {}",
         verified.version,
         verified.vault_address,
         verified.state_address
     );
-    Ok(Some(verified))
+    Some(verified)
 }
 
 /// Streaming datasources recover their own disconnects at best, never their own
@@ -179,12 +188,8 @@ async fn main() -> CarbonResult<()> {
             alerting_output_dir,
             dashboard_output_dir,
         } => {
-            let config = Config::load(&config_path).unwrap_or_else(|err| {
-                panic!("failed to load config {}: {err:?}", config_path.display())
-            });
-            verify_decoder_target(&config, &config_path);
-            verify_configured_multisig(&config)
-                .unwrap_or_else(|error| panic!("invalid configured multisig: {error:#}"));
+            let config = load_config(&config_path);
+            verify_configured_multisig(&config);
             let alerting_output =
                 alerting::generate(&config, &alerting_output_dir).unwrap_or_else(|err| {
                     panic!("failed to generate Grafana alerting config: {err:?}")
@@ -207,12 +212,10 @@ async fn main() -> CarbonResult<()> {
         Command::Run { config_path } => config_path,
     };
 
-    logging::init();
+    logging::init(None);
     install_crypto_provider();
 
-    let config = Config::load(&config_path)
-        .unwrap_or_else(|err| panic!("failed to load config {}: {err:?}", config_path.display()));
-    verify_decoder_target(&config, &config_path);
+    let config = load_config(&config_path);
 
     log::info!(
         "microscope-indexer starting: program_id={} idl_path={} multisig_vault={} multisig_version={} datasource={} alert_rules={}",
@@ -234,8 +237,7 @@ async fn main() -> CarbonResult<()> {
 
     telemetry::install();
     health::serve().await;
-    let multisig = verify_configured_multisig(&config)
-        .unwrap_or_else(|error| panic!("invalid configured multisig: {error:#}"));
+    let multisig = verify_configured_multisig(&config);
     let multisig_state_address = multisig.map(|verified| verified.state_address);
 
     let builder = Pipeline::builder().metrics(Arc::new(LogMetrics::new()));
@@ -276,12 +278,10 @@ async fn run_backfill(
     loki_max_age: Option<Duration>,
 ) -> CarbonResult<()> {
     let (record_sink, record_receiver) = tokio::sync::mpsc::unbounded_channel();
-    logging::init_with_record_sink(record_sink.clone());
+    logging::init(Some(record_sink.clone()));
     install_crypto_provider();
 
-    let config = Config::load(&config_path)
-        .unwrap_or_else(|err| panic!("failed to load config {}: {err:?}", config_path.display()));
-    verify_decoder_target(&config, &config_path);
+    let config = load_config(&config_path);
     let rpc_url = rpc_url
         .or_else(|| std::env::var("RPC_URL").ok().filter(|url| !url.is_empty()))
         .unwrap_or_else(|| panic!("pass --rpc-url or set the RPC_URL env var"));
@@ -313,8 +313,7 @@ async fn run_backfill(
         .expect("system clock predates the unix epoch")
         .as_secs();
     let cutoff_unix = started_unix as i64 - since.as_secs() as i64;
-    let multisig = verify_configured_multisig(&config)
-        .unwrap_or_else(|error| panic!("invalid configured multisig: {error:#}"));
+    let multisig = verify_configured_multisig(&config);
     log::info!(
         "backfilling {} and {} since unix time {cutoff_unix} into {loki_url}",
         config.program_id,
@@ -330,15 +329,11 @@ async fn run_backfill(
         record_receiver,
     ));
     let crawl_failures = Arc::new(std::sync::atomic::AtomicU32::new(0));
-    let mut crawl_addresses = vec![PROGRAM_ID];
-    if let Some(verified) = multisig {
-        crawl_addresses.push(verified.state_address);
-    }
-    crawl_addresses.sort_unstable();
-    crawl_addresses.dedup();
-
     let mut builder = Pipeline::builder();
-    for address in crawl_addresses {
+    for address in rpc_polling::monitored_addresses(
+        PROGRAM_ID,
+        multisig.map(|verified| verified.state_address),
+    ) {
         builder = builder.datasource(backfill::BackfillDatasource::new(
             rpc_url.clone(),
             address,
@@ -385,17 +380,13 @@ async fn run_backfill(
 }
 
 fn carbon_failed_updates(snapshot: &carbon_core::metrics::MetricsSnapshot) -> u64 {
-    snapshot
-        .counters
-        .iter()
-        .find(|(name, _, _)| *name == "carbon_updates_failed_total")
-        .map(|(_, _, value)| *value)
+    telemetry::carbon_counter(snapshot, "carbon_updates_failed_total")
         .expect("carbon pipeline registers the failed-updates counter")
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{str::FromStr, sync::Arc};
+    use std::sync::Arc;
 
     use carbon_core::{
         datasource::{DatasourceId, Update},
@@ -406,20 +397,11 @@ mod tests {
         transformers::extract_instructions_with_metadata,
     };
     use solana_pubkey::Pubkey;
-    use solana_signature::Signature;
-    use solana_transaction_status::EncodedConfirmedTransactionWithStatusMeta;
 
     use super::{deduplication_filters, with_instruction_pipes, MultisigVersion, VerifiedMultisig};
 
     fn redelivered_instruction() -> NestedInstruction {
-        let fetched: EncodedConfirmedTransactionWithStatusMeta = serde_json::from_str(
-            include_str!("../tests/fixtures/squads_v4_vault_execute.json"),
-        )
-        .expect("fixture deserializes");
-        let signature = Signature::from_str(
-            "DTJvwK9o6DjaUZs5NF598Qbhk89uahfXyorkXUWhhr8iH5x3QHbQAGum97LEUqzC7LiJ8FYeK19P2vJMKVo74DS",
-        )
-        .unwrap();
+        let (signature, fetched) = crate::test_support::squads_v4_vault_execute();
         let Update::Transaction(update) = crate::backfill::transaction_update(signature, fetched)
             .expect("fixture converts to an update")
         else {

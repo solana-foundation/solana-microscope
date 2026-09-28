@@ -1,6 +1,6 @@
 use std::{
     collections::BTreeSet,
-    fmt,
+    env, fmt,
     path::{Path, PathBuf},
     str::FromStr,
 };
@@ -326,6 +326,14 @@ impl Default for DatasourceConfig {
 }
 
 impl DatasourceConfig {
+    pub fn polls_rpc(&self) -> bool {
+        self.polls_rpc_with(env::var("RPC_URL").ok().as_deref())
+    }
+
+    pub fn polls_rpc_with(&self, rpc_url: Option<&str>) -> bool {
+        self.mode == DatasourceMode::Rpc || rpc_url.is_some_and(|url| !url.trim().is_empty())
+    }
+
     pub const fn rpc_poll_stale_after_seconds(&self) -> u64 {
         let threshold = self.poll_interval_seconds.saturating_mul(6);
         if threshold < 60 {
@@ -667,8 +675,8 @@ mod tests {
 
     use super::{
         AlertChannel, AlertCondition, AlertConditionOperator, AlertConditionValue, AlertKind,
-        AlertMatch, AlertRule, AlertSeverity, AlertingConfig, Config, DashboardConfig,
-        DatasourceConfig, DatasourceMode, MultisigConfig, MultisigVersion,
+        AlertMatch, AlertRule, AlertSeverity, AlertingConfig, Config, DatasourceConfig,
+        DatasourceMode, MultisigConfig, MultisigVersion,
     };
 
     const IDL: &str = "tests/fixtures/idl.json";
@@ -682,10 +690,7 @@ mod tests {
                 state_address: vault_address.to_string(),
                 version: MultisigVersion::V4,
             }),
-            datasource: DatasourceConfig::default(),
-            alerting: AlertingConfig::default(),
-            dashboard: DashboardConfig::default(),
-            alert_rules: vec![],
+            ..crate::test_support::config()
         }
     }
 
@@ -712,13 +717,14 @@ mod tests {
 
     #[test]
     fn rejects_invalid_multisig_vault_address() {
-        let config = config(
-            "11111111111111111111111111111111",
-            "not-a-pubkey",
-            "Cargo.toml",
-        );
+        let valid = "11111111111111111111111111111111";
+        let mut config = config(valid, valid, "Cargo.toml");
+        config.multisig.as_mut().unwrap().vault_address = "not-a-pubkey".to_string();
 
-        assert!(config.validate(Path::new("microscope.toml")).is_err());
+        let error = config
+            .validate(Path::new("microscope.toml"))
+            .expect_err("an invalid vault address must be rejected");
+        assert!(format!("{error:#}").contains("invalid multisig.vault_address"));
     }
 
     #[test]
@@ -788,16 +794,9 @@ state_address = "11111111111111111111111111111111""#
     fn rejects_multisig_alert_without_multisig_config() {
         let mut config = config("11111111111111111111111111111111", "unused", "Cargo.toml");
         config.multisig = None;
-        config.alert_rules.push(AlertRule {
-            kind: AlertKind::Multisig,
-            name: "proposal_created".to_string(),
-            match_mode: AlertMatch::All,
-            conditions: vec![],
-            severity: AlertSeverity::Warning,
-            channels: vec![],
-            lookback_window_seconds: None,
-            evaluation_interval_seconds: None,
-        });
+        config
+            .alert_rules
+            .push(alert(AlertKind::Multisig, "proposal_created"));
 
         assert!(config.validate(Path::new("microscope.toml")).is_err());
     }
@@ -815,9 +814,6 @@ state_address = "11111111111111111111111111111111""#
         let valid = "11111111111111111111111111111111";
         let mut config = config(valid, valid, IDL);
         config.alert_rules.push(AlertRule {
-            kind: AlertKind::Instruction,
-            name: "create_record".to_string(),
-            match_mode: AlertMatch::All,
             conditions: vec![
                 AlertCondition {
                     field: "data.data.transfer_data.amount".to_string(),
@@ -830,10 +826,8 @@ state_address = "11111111111111111111111111111111""#
                     value: Some(AlertConditionValue::Boolean(false)),
                 },
             ],
-            severity: AlertSeverity::Warning,
             channels: vec![AlertChannel::Slack],
-            lookback_window_seconds: None,
-            evaluation_interval_seconds: None,
+            ..alert(AlertKind::Instruction, "create_record")
         });
 
         config
@@ -950,6 +944,20 @@ replay_window_slots = 900"#,
     }
 
     #[test]
+    fn polls_rpc_in_rpc_mode_or_whenever_an_rpc_url_is_set() {
+        let yellowstone = DatasourceConfig::default();
+        assert!(!yellowstone.polls_rpc_with(None));
+        assert!(!yellowstone.polls_rpc_with(Some("  ")));
+        assert!(yellowstone.polls_rpc_with(Some("http://rpc.test")));
+
+        let rpc = DatasourceConfig {
+            mode: DatasourceMode::Rpc,
+            ..DatasourceConfig::default()
+        };
+        assert!(rpc.polls_rpc_with(None));
+    }
+
+    #[test]
     fn rejects_invalid_rpc_poll_interval() {
         let valid = "11111111111111111111111111111111";
         let mut config = config(valid, valid, "Cargo.toml");
@@ -973,26 +981,6 @@ replay_window_slots = 900"#,
             .expect_err("an empty replay window must be rejected");
         assert!(format!("{error:#}")
             .contains("datasource.replay_window_slots must be between 1 and 100000"));
-    }
-
-    #[test]
-    fn applies_dashboard_defaults_when_section_is_absent() {
-        #[derive(Deserialize)]
-        struct Wrapper {
-            #[serde(default)]
-            dashboard: DashboardConfig,
-        }
-
-        let wrapper: Wrapper = toml::from_str("").unwrap();
-
-        assert_eq!(
-            wrapper.dashboard.event_fields,
-            DashboardConfig::default().event_fields
-        );
-        assert_eq!(
-            wrapper.dashboard.multisig_fields,
-            DashboardConfig::default().multisig_fields
-        );
     }
 
     #[test]
@@ -1022,23 +1010,20 @@ replay_window_slots = 900"#,
     #[test]
     fn rejects_alert_rules_with_invalid_field_paths() {
         let valid = "11111111111111111111111111111111";
-        let mut config = config(valid, valid, "Cargo.toml");
+        let mut config = config(valid, valid, IDL);
         config.alert_rules.push(AlertRule {
-            kind: AlertKind::Event,
-            name: "record_created_event".to_string(),
-            match_mode: AlertMatch::All,
             conditions: vec![AlertCondition {
                 field: "data..amount".to_string(),
                 operator: AlertConditionOperator::Gt,
                 value: Some(AlertConditionValue::Integer(0)),
             }],
-            severity: AlertSeverity::Critical,
-            channels: vec![],
-            lookback_window_seconds: None,
-            evaluation_interval_seconds: None,
+            ..alert(AlertKind::Event, "record_created_event")
         });
 
-        assert!(config.validate(Path::new("microscope.toml")).is_err());
+        let error = config
+            .validate(Path::new("microscope.toml"))
+            .expect_err("an invalid field path must be rejected");
+        assert!(format!("{error:#}").contains("must be a dot-separated JSON path"));
     }
 
     #[test]
@@ -1046,14 +1031,8 @@ replay_window_slots = 900"#,
         let valid = "11111111111111111111111111111111";
         let mut config = config(valid, valid, "Cargo.toml");
         config.alert_rules.push(AlertRule {
-            kind: AlertKind::Event,
-            name: "record_created_event".to_string(),
-            match_mode: AlertMatch::All,
-            conditions: vec![],
-            severity: AlertSeverity::Warning,
             channels: vec![AlertChannel::Slack, AlertChannel::Slack],
-            lookback_window_seconds: None,
-            evaluation_interval_seconds: None,
+            ..alert(AlertKind::Event, "record_created_event")
         });
 
         let error = config
@@ -1202,14 +1181,9 @@ evaluation_interval_seconds = 30"#,
         let valid = "11111111111111111111111111111111";
         let mut config = config(valid, valid, "Cargo.toml");
         config.alert_rules.push(AlertRule {
-            kind: AlertKind::Event,
-            name: "created".to_string(),
-            match_mode: AlertMatch::All,
-            conditions: vec![],
-            severity: AlertSeverity::Warning,
-            channels: vec![],
             lookback_window_seconds: Some(5),
             evaluation_interval_seconds: Some(10),
+            ..alert(AlertKind::Event, "created")
         });
 
         let error = config
@@ -1240,14 +1214,9 @@ evaluation_interval_seconds = 30"#,
         let valid = "11111111111111111111111111111111";
         let mut config = config(valid, valid, "Cargo.toml");
         config.alert_rules.push(AlertRule {
-            kind: AlertKind::Event,
-            name: "created".to_string(),
-            match_mode: AlertMatch::All,
-            conditions: vec![],
-            severity: AlertSeverity::Warning,
-            channels: vec![],
             lookback_window_seconds: Some(60),
             evaluation_interval_seconds: Some(15),
+            ..alert(AlertKind::Event, "created")
         });
 
         let error = config

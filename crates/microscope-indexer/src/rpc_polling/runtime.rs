@@ -12,7 +12,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::{
     checkpoint::{CheckpointLoadOutcome, CheckpointMismatch, CheckpointStore},
-    unreachable_below, PollingState, RpcPollingDatasource,
+    monitored_addresses, unreachable_below, PollingState, RpcPollingDatasource,
 };
 use crate::{delivered::DeliveredSignatures, shipped, telemetry};
 
@@ -66,7 +66,7 @@ impl Datasource for RpcPollingDatasource {
     ) -> CarbonResult<()> {
         let rpc_client =
             RpcClient::new_with_commitment(self.rpc_url.clone(), CommitmentConfig::confirmed());
-        let addresses = self.monitored_addresses();
+        let addresses = monitored_addresses(self.program_id, self.multisig_state_address);
         log::info!(
             "RPC polling monitors {}",
             addresses
@@ -329,16 +329,9 @@ fn pipeline_drained(channel_empty: bool, snapshot: &carbon_core::metrics::Metric
     if !channel_empty {
         return false;
     }
-    let counter = |name: &str| {
-        snapshot
-            .counters
-            .iter()
-            .find(|(counter_name, _, _)| *counter_name == name)
-            .map(|(_, _, value)| *value)
-    };
     match (
-        counter("carbon_updates_received_total"),
-        counter("carbon_updates_processed_total"),
+        telemetry::carbon_counter(snapshot, "carbon_updates_received_total"),
+        telemetry::carbon_counter(snapshot, "carbon_updates_processed_total"),
     ) {
         (Some(received), Some(processed)) => received == processed,
         _ => true,

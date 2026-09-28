@@ -13,7 +13,7 @@ use crate::{
         AlertChannel, AlertCondition, AlertConditionOperator, AlertConditionValue, AlertKind,
         AlertMatch, AlertRule, Config, DatasourceMode,
     },
-    dashboard,
+    dashboard, files,
 };
 
 const RPC_HEALTH_EVALUATION_INTERVAL_SECONDS: u64 = 30;
@@ -37,8 +37,7 @@ const YELLOWSTONE_PROBE_WINDOW_SECONDS: u64 = 120;
 pub(crate) const RPC_POLL_FAILURE_WINDOW_SECONDS: u64 = 900;
 
 pub fn generate(config: &Config, output_dir: &Path) -> anyhow::Result<PathBuf> {
-    let rpc_polling = config.datasource.mode == DatasourceMode::Rpc
-        || env::var("RPC_URL").is_ok_and(|url| !url.trim().is_empty());
+    let rpc_polling = config.datasource.polls_rpc();
     let channels = configured_channels(config);
     validate_contact_point_credentials(&channels)?;
     fs::create_dir_all(output_dir).with_context(|| {
@@ -55,12 +54,11 @@ pub fn generate(config: &Config, output_dir: &Path) -> anyhow::Result<PathBuf> {
         add_resource_deletions(&mut document, previous);
     }
 
-    let temporary = output_dir.join(".microscope.json.tmp");
-    let contents = serde_json::to_vec_pretty(&document)?;
-    fs::write(&temporary, contents)
-        .with_context(|| format!("writing temporary alerting config {}", temporary.display()))?;
-    fs::rename(&temporary, &output)
-        .with_context(|| format!("installing alerting config {}", output.display()))?;
+    files::replace(
+        &output,
+        &serde_json::to_vec_pretty(&document)?,
+        "alerting config",
+    )?;
 
     Ok(output)
 }
@@ -143,39 +141,24 @@ fn provisioning_document(
 ) -> anyhow::Result<Value> {
     let pending_seconds = config.alerting.health_pending_period_seconds;
     let mut rules_by_interval = BTreeMap::<u64, Vec<Value>>::new();
-    rules_by_interval
+    let health_rules = rules_by_interval
         .entry(RPC_HEALTH_EVALUATION_INTERVAL_SECONDS)
-        .or_default()
-        .extend(rpc_recovery_degraded_rules(channels, pending_seconds));
-    rules_by_interval
-        .entry(RPC_HEALTH_EVALUATION_INTERVAL_SECONDS)
-        .or_default()
-        .extend(datasource_drop_rules(channels, pending_seconds));
+        .or_default();
+    health_rules.extend(rpc_recovery_degraded_rules(channels, pending_seconds));
+    health_rules.extend(datasource_drop_rules(channels, pending_seconds));
     if config.datasource.mode == DatasourceMode::Yellowstone {
-        rules_by_interval
-            .entry(RPC_HEALTH_EVALUATION_INTERVAL_SECONDS)
-            .or_default()
-            .extend(yellowstone_health_rules(channels, pending_seconds));
+        health_rules.extend(yellowstone_health_rules(channels, pending_seconds));
     }
-    rules_by_interval
-        .entry(RPC_HEALTH_EVALUATION_INTERVAL_SECONDS)
-        .or_default()
-        .extend(log_delivery_rules(channels, pending_seconds));
+    health_rules.extend(log_delivery_rules(channels, pending_seconds));
     if config.multisig.is_some() {
-        rules_by_interval
-            .entry(RPC_HEALTH_EVALUATION_INTERVAL_SECONDS)
-            .or_default()
-            .extend(multisig_health_rules(
-                channels,
-                config.alerting.multisig_unmatched_window_seconds,
-                pending_seconds,
-            ));
+        health_rules.extend(multisig_health_rules(
+            channels,
+            config.alerting.multisig_unmatched_window_seconds,
+            pending_seconds,
+        ));
     }
     if rpc_polling {
-        rules_by_interval
-            .entry(RPC_HEALTH_EVALUATION_INTERVAL_SECONDS)
-            .or_default()
-            .extend(rpc_health_rules(config, channels, pending_seconds));
+        health_rules.extend(rpc_health_rules(config, channels, pending_seconds));
     }
     for alert in &config.alert_rules {
         let rules = rules_by_interval
@@ -599,21 +582,7 @@ fn loki_health_rule(
     health_rule(
         uid,
         title,
-        json!({
-            "refId": "A",
-            "queryType": "range",
-            "relativeTimeRange": { "from": window_seconds, "to": 0 },
-            "datasourceUid": "loki",
-            "model": {
-                "datasource": { "type": "loki", "uid": "loki" },
-                "editorMode": "code",
-                "expr": query,
-                "intervalMs": 1000,
-                "maxDataPoints": 43200,
-                "queryType": "range",
-                "refId": "A",
-            },
-        }),
+        loki_query(query, window_seconds),
         condition,
         pending_seconds.min(window_seconds / 2),
         "OK",
@@ -622,6 +591,58 @@ fn loki_health_rule(
         channel,
         description,
     )
+}
+
+fn loki_query(query: &str, window_seconds: u64) -> Value {
+    json!({
+        "refId": "A",
+        "queryType": "range",
+        "relativeTimeRange": { "from": window_seconds, "to": 0 },
+        "datasourceUid": "loki",
+        "model": {
+            "datasource": { "type": "loki", "uid": "loki" },
+            "editorMode": "code",
+            "expr": query,
+            "intervalMs": 1000,
+            "maxDataPoints": 43200,
+            "queryType": "range",
+            "refId": "A",
+        },
+    })
+}
+
+fn rule_data(query: Value, condition: &str) -> Value {
+    json!([
+        query,
+        {
+            "refId": "B",
+            "queryType": "",
+            "relativeTimeRange": { "from": 0, "to": 0 },
+            "datasourceUid": "__expr__",
+            "model": {
+                "conditions": [],
+                "datasource": { "type": "__expr__", "uid": "__expr__" },
+                "expression": "A",
+                "reducer": "last",
+                "refId": "B",
+                "settings": { "mode": "dropNN" },
+                "type": "reduce",
+            },
+        },
+        {
+            "refId": "C",
+            "queryType": "",
+            "relativeTimeRange": { "from": 0, "to": 0 },
+            "datasourceUid": "__expr__",
+            "model": {
+                "conditions": [],
+                "datasource": { "type": "__expr__", "uid": "__expr__" },
+                "expression": condition,
+                "refId": "C",
+                "type": "math",
+            },
+        },
+    ])
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -641,37 +662,7 @@ fn health_rule(
         "uid": uid,
         "title": title,
         "condition": "C",
-        "data": [
-            query,
-            {
-                "refId": "B",
-                "queryType": "",
-                "relativeTimeRange": { "from": 0, "to": 0 },
-                "datasourceUid": "__expr__",
-                "model": {
-                    "conditions": [],
-                    "datasource": { "type": "__expr__", "uid": "__expr__" },
-                    "expression": "A",
-                    "reducer": "last",
-                    "refId": "B",
-                    "settings": { "mode": "dropNN" },
-                    "type": "reduce",
-                },
-            },
-            {
-                "refId": "C",
-                "queryType": "",
-                "relativeTimeRange": { "from": 0, "to": 0 },
-                "datasourceUid": "__expr__",
-                "model": {
-                    "conditions": [],
-                    "datasource": { "type": "__expr__", "uid": "__expr__" },
-                    "expression": condition,
-                    "refId": "C",
-                    "type": "math",
-                },
-            },
-        ],
+        "data": rule_data(query, condition),
         "noDataState": no_data_state,
         "execErrState": "Error",
         "for": format!("{pending_seconds}s"),
@@ -748,51 +739,7 @@ fn grafana_rule(
         "uid": uid,
         "title": title,
         "condition": "C",
-        "data": [
-            {
-                "refId": "A",
-                "queryType": "range",
-                "relativeTimeRange": { "from": lookback_window_seconds, "to": 0 },
-                "datasourceUid": "loki",
-                "model": {
-                    "datasource": { "type": "loki", "uid": "loki" },
-                    "editorMode": "code",
-                    "expr": query,
-                    "intervalMs": 1000,
-                    "maxDataPoints": 43200,
-                    "queryType": "range",
-                    "refId": "A",
-                },
-            },
-            {
-                "refId": "B",
-                "queryType": "",
-                "relativeTimeRange": { "from": 0, "to": 0 },
-                "datasourceUid": "__expr__",
-                "model": {
-                    "conditions": [],
-                    "datasource": { "type": "__expr__", "uid": "__expr__" },
-                    "expression": "A",
-                    "reducer": "last",
-                    "refId": "B",
-                    "settings": { "mode": "dropNN" },
-                    "type": "reduce",
-                },
-            },
-            {
-                "refId": "C",
-                "queryType": "",
-                "relativeTimeRange": { "from": 0, "to": 0 },
-                "datasourceUid": "__expr__",
-                "model": {
-                    "conditions": [],
-                    "datasource": { "type": "__expr__", "uid": "__expr__" },
-                    "expression": "$B > 0",
-                    "refId": "C",
-                    "type": "math",
-                },
-            },
-        ],
+        "data": rule_data(loki_query(&query, lookback_window_seconds), "$B > 0"),
         "noDataState": "OK",
         // A match counts for one lookback window, so any pending period long
         // enough to absorb a failed evaluation would mute these for good.
@@ -1019,8 +966,7 @@ mod tests {
 
     use crate::config::{
         AlertChannel, AlertCondition, AlertConditionOperator, AlertConditionValue, AlertKind,
-        AlertMatch, AlertRule, AlertSeverity, AlertingConfig, Config, DashboardConfig,
-        DatasourceConfig, DatasourceMode, MultisigConfig, MultisigVersion,
+        AlertMatch, AlertRule, AlertSeverity, AlertingConfig, Config, DatasourceMode,
     };
 
     use super::{
@@ -1049,17 +995,8 @@ mod tests {
 
     fn config(alert_rules: Vec<AlertRule>) -> Config {
         Config {
-            program_id: "11111111111111111111111111111111".to_string(),
-            idl_path: "Cargo.toml".to_string(),
-            multisig: Some(MultisigConfig {
-                vault_address: "11111111111111111111111111111111".to_string(),
-                state_address: "11111111111111111111111111111111".to_string(),
-                version: MultisigVersion::V4,
-            }),
-            datasource: DatasourceConfig::default(),
-            alerting: AlertingConfig::default(),
-            dashboard: DashboardConfig::default(),
             alert_rules,
+            ..crate::test_support::config()
         }
     }
 
@@ -1069,13 +1006,7 @@ mod tests {
         let channels = BTreeSet::from([AlertChannel::Slack]);
 
         let document = provisioning_document(&config, &channels, false).unwrap();
-        let degraded = document["groups"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .flat_map(|group| group["rules"].as_array().unwrap())
-            .find(|rule| rule["uid"] == "ms-rpc-recovery-degraded-slack")
-            .unwrap();
+        let degraded = health_rule(&document, "ms-rpc-recovery-degraded-slack").unwrap();
 
         assert_eq!(
             degraded["data"][0]["model"]["expr"],
@@ -1083,12 +1014,7 @@ mod tests {
         );
         assert_eq!(degraded["noDataState"], "OK");
         assert_eq!(degraded["labels"]["severity"], "critical");
-        assert!(document["groups"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .flat_map(|group| group["rules"].as_array().unwrap())
-            .any(|rule| rule["uid"] == "ms-rpc-checkpoint-corrupt-slack"));
+        assert!(health_rule(&document, "ms-rpc-checkpoint-corrupt-slack").is_some());
     }
 
     #[test]
@@ -1096,13 +1022,7 @@ mod tests {
         let mut config = config(vec![]);
         let channels = BTreeSet::from([AlertChannel::Slack]);
         let drop_rule = |document: &serde_json::Value| {
-            document["groups"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .flat_map(|group| group["rules"].as_array().unwrap())
-                .find(|rule| rule["uid"] == "ms-datasource-drop-slack")
-                .cloned()
+            health_rule(document, "ms-datasource-drop-slack").cloned()
         };
 
         let rule = drop_rule(&provisioning_document(&config, &channels, false).unwrap()).unwrap();
@@ -1129,13 +1049,7 @@ mod tests {
         let channels = BTreeSet::from([AlertChannel::Slack]);
 
         let document = provisioning_document(&config, &channels, false).unwrap();
-        let gap = document["groups"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .flat_map(|group| group["rules"].as_array().unwrap())
-            .find(|rule| rule["uid"] == "ms-yellowstone-gap-slack")
-            .unwrap();
+        let gap = health_rule(&document, "ms-yellowstone-gap-slack").unwrap();
 
         assert_eq!(gap["data"][0]["datasourceUid"], "prometheus");
         assert_eq!(
@@ -1223,16 +1137,19 @@ mod tests {
         assert_eq!(rule["labels"]["channel"], "slack");
     }
 
-    fn health_rule<'a>(
-        document: &'a serde_json::Value,
-        uid: &str,
-    ) -> Option<&'a serde_json::Value> {
+    fn rules(document: &serde_json::Value) -> impl Iterator<Item = &serde_json::Value> {
         document["groups"]
             .as_array()
             .unwrap()
             .iter()
             .flat_map(|group| group["rules"].as_array().unwrap())
-            .find(|rule| rule["uid"] == uid)
+    }
+
+    fn health_rule<'a>(
+        document: &'a serde_json::Value,
+        uid: &str,
+    ) -> Option<&'a serde_json::Value> {
+        rules(document).find(|rule| rule["uid"] == uid)
     }
 
     #[test]
@@ -1250,11 +1167,7 @@ mod tests {
         assert_eq!(rule("ms-datasource-drop-slack")["execErrState"], "Error");
 
         // Event rules match for one lookback window, so they cannot pend at all.
-        let event = document["groups"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .flat_map(|group| group["rules"].as_array().unwrap())
+        let event = rules(&document)
             .find(|rule| rule["labels"]["signal_name"] == "transfer")
             .expect("event rule is generated");
         assert_eq!(event["for"], "0s");
@@ -1282,13 +1195,7 @@ mod tests {
         let config = config(vec![]);
         let channels = BTreeSet::from([AlertChannel::Slack]);
         let stream_rule = |document: &serde_json::Value| {
-            document["groups"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .flat_map(|group| group["rules"].as_array().unwrap())
-                .find(|rule| rule["uid"] == "ms-yellowstone-stream-slack")
-                .cloned()
+            health_rule(document, "ms-yellowstone-stream-slack").cloned()
         };
 
         assert_eq!(config.datasource.mode, DatasourceMode::Yellowstone);
@@ -1317,16 +1224,7 @@ mod tests {
         let channels = BTreeSet::from([AlertChannel::Slack]);
 
         let document = provisioning_document(&config, &channels, false).unwrap();
-        let rules = document["groups"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .flat_map(|group| group["rules"].as_array().unwrap())
-            .collect::<Vec<_>>();
-        let stalled = rules
-            .iter()
-            .find(|rule| rule["uid"] == "ms-log-delivery-stalled-slack")
-            .unwrap();
+        let stalled = health_rule(&document, "ms-log-delivery-stalled-slack").unwrap();
         assert_eq!(
             stalled["data"][0]["model"]["expr"],
             "sum(increase(microscope_transactions_total[10m])) > 0 unless sum(increase(loki_write_sent_entries_total[10m])) > 0"
@@ -1345,24 +1243,9 @@ mod tests {
         let channels = BTreeSet::from([AlertChannel::Slack]);
 
         let document = provisioning_document(&config, &channels, true).unwrap();
-        let rules = document["groups"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .flat_map(|group| group["rules"].as_array().unwrap())
-            .collect::<Vec<_>>();
-        let stale = rules
-            .iter()
-            .find(|rule| rule["uid"] == "ms-rpc-poll-stale-slack")
-            .unwrap();
-        let lag = rules
-            .iter()
-            .find(|rule| rule["uid"] == "ms-rpc-poll-lag-slack")
-            .unwrap();
-        let quarantine = rules
-            .iter()
-            .find(|rule| rule["uid"] == "ms-rpc-quarantine-slack")
-            .unwrap();
+        let stale = health_rule(&document, "ms-rpc-poll-stale-slack").unwrap();
+        let lag = health_rule(&document, "ms-rpc-poll-lag-slack").unwrap();
+        let quarantine = health_rule(&document, "ms-rpc-quarantine-slack").unwrap();
 
         assert_eq!(stale["data"][0]["datasourceUid"], "prometheus");
         assert!(stale["data"][0]["model"]["expr"]
@@ -1383,10 +1266,7 @@ mod tests {
             "microscope_rpc_poll_quarantined_transactions"
         );
 
-        let checkpoint_stale = rules
-            .iter()
-            .find(|rule| rule["uid"] == "ms-rpc-checkpoint-stale-slack")
-            .unwrap();
+        let checkpoint_stale = health_rule(&document, "ms-rpc-checkpoint-stale-slack").unwrap();
         assert!(checkpoint_stale["data"][0]["model"]["expr"]
             .as_str()
             .unwrap()
@@ -1397,10 +1277,7 @@ mod tests {
         );
         assert_eq!(checkpoint_stale["noDataState"], "Alerting");
 
-        let corrupt = rules
-            .iter()
-            .find(|rule| rule["uid"] == "ms-rpc-checkpoint-corrupt-slack")
-            .unwrap();
+        let corrupt = health_rule(&document, "ms-rpc-checkpoint-corrupt-slack").unwrap();
         assert_eq!(
             corrupt["data"][0]["model"]["expr"],
             "microscope_rpc_checkpoint_quarantined_files"
@@ -1437,12 +1314,7 @@ mod tests {
             config.datasource.poll_interval_seconds = poll_interval_seconds;
             config.alerting.rpc_poll_sustained_failure_seconds = sustained_failure_seconds;
             let document = provisioning_document(&config, &channels, true).unwrap();
-            document["groups"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .flat_map(|group| group["rules"].as_array().unwrap())
-                .find(|rule| rule["uid"] == "ms-rpc-poll-failing-slack")
+            health_rule(&document, "ms-rpc-poll-failing-slack")
                 .cloned()
                 .expect("a failing poller is alertable")
         };
@@ -1487,17 +1359,20 @@ mod tests {
         let config = config(vec![]);
         let channels = BTreeSet::from([AlertChannel::Slack]);
         let stale_uids = |document: &serde_json::Value| {
-            document["groups"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .flat_map(|group| group["rules"].as_array().unwrap())
+            rules(document)
                 .filter(|rule| rule["uid"] == "ms-rpc-poll-stale-slack")
                 .count()
         };
 
-        let with_recovery = provisioning_document(&config, &channels, true).unwrap();
-        let without_recovery = provisioning_document(&config, &channels, false).unwrap();
+        let with_recovery = provisioning_document(
+            &config,
+            &channels,
+            config.datasource.polls_rpc_with(Some("http://rpc.test")),
+        )
+        .unwrap();
+        let without_recovery =
+            provisioning_document(&config, &channels, config.datasource.polls_rpc_with(None))
+                .unwrap();
 
         assert_eq!(config.datasource.mode, DatasourceMode::Yellowstone);
         assert_eq!(stale_uids(&with_recovery), 1);
@@ -1759,12 +1634,7 @@ mod tests {
         )
         .unwrap();
 
-        let rules = document["groups"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .flat_map(|group| group["rules"].as_array().unwrap())
-            .collect::<Vec<_>>();
+        let rules = rules(&document).collect::<Vec<_>>();
         assert!(rules.len() > 1);
 
         for rule in rules {

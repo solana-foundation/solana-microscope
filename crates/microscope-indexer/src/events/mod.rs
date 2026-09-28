@@ -85,10 +85,6 @@ fn is_program_emitted(line: &str) -> bool {
     line.starts_with("Program log: ") || line.starts_with("Program return: ")
 }
 
-pub fn cpi_to_log_data(event: &CpiEvent) -> Option<DecodedEvent> {
-    to_log_data(event, EventSource::Cpi)
-}
-
 /// Event self-CPIs are separate instructions, so processing them on their own
 /// would attribute the event to the synthetic `cpi_event` name. Collect them
 /// from the emitting instruction's children instead, where the operation name
@@ -105,7 +101,7 @@ pub fn decode_child_events(
         let Some(event) = CpiEvent::decode(&child.instruction.data) else {
             continue;
         };
-        match cpi_to_log_data(&event) {
+        match to_log_data(&event, EventSource::Cpi) {
             Some(event) => decoded.events.push(event),
             None => decoded.rejected += 1,
         }
@@ -152,7 +148,7 @@ mod tests {
 
     use carbon_program_decoder::instructions::CpiEvent;
 
-    use super::{cpi_to_log_data, decode_logs, EventSource};
+    use super::{decode_logs, to_log_data, EventSource};
 
     const EVENT_CPI_PREFIX: [u8; 8] = [228, 69, 165, 46, 81, 203, 154, 29];
 
@@ -353,7 +349,7 @@ mod tests {
         .concat();
 
         let event = CpiEvent::decode(&instruction_data).expect("generated event decodes");
-        let event = cpi_to_log_data(&event).expect("generated event serializes");
+        let event = to_log_data(&event, EventSource::Cpi).expect("generated event serializes");
 
         assert_eq!(event.name, "subscription_created_event");
         assert_eq!(event.source, EventSource::Cpi);
