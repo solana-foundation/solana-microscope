@@ -192,6 +192,14 @@ pub fn set_rpc_recent_signatures(signatures: u64) {
     metrics::gauge!("microscope_rpc_poll_recent_signatures").set(signatures as f64);
 }
 
+pub fn carbon_counter(snapshot: &carbon_core::metrics::MetricsSnapshot, name: &str) -> Option<u64> {
+    snapshot
+        .counters
+        .iter()
+        .find(|(counter_name, _, _)| *counter_name == name)
+        .map(|(_, _, value)| *value)
+}
+
 pub fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

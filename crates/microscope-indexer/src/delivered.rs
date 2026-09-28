@@ -64,12 +64,7 @@ impl Default for DeliveredSignatures {
 #[cfg(test)]
 mod tests {
     use super::DeliveredSignatures;
-
-    fn signature(value: u64) -> solana_signature::Signature {
-        let mut bytes = [0; 64];
-        bytes[..8].copy_from_slice(&value.to_le_bytes());
-        solana_signature::Signature::from(bytes)
-    }
+    use crate::test_support::signature;
 
     #[tokio::test]
     async fn drains_every_recorded_delivery_once() {

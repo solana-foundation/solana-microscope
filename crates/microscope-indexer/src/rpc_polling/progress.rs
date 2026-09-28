@@ -157,13 +157,10 @@ mod tests {
     use solana_pubkey::Pubkey;
 
     use super::{advance_ready_cursors, signature_is_ready, PollingState, SignatureContext};
-    use crate::rpc_polling::signatures::{AddressBatch, AddressCursor, DiscoveredSignature};
-
-    fn signature(value: u64) -> solana_signature::Signature {
-        let mut bytes = [0; 64];
-        bytes[..8].copy_from_slice(&value.to_le_bytes());
-        solana_signature::Signature::from(bytes)
-    }
+    use crate::{
+        rpc_polling::signatures::{AddressBatch, AddressCursor, DiscoveredSignature},
+        test_support::signature,
+    };
 
     #[test]
     fn limits_history_boundary_checks_by_time() {

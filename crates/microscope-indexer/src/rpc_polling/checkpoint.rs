@@ -1,6 +1,5 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    ffi::OsString,
     fmt,
     io::ErrorKind,
     path::{Path, PathBuf},
@@ -14,6 +13,7 @@ use solana_signature::Signature;
 use tokio::io::AsyncWriteExt;
 
 use super::signatures::AddressCursor;
+use crate::files::temporary_path;
 
 #[derive(Debug)]
 pub(super) struct CheckpointMismatch(String);
@@ -359,16 +359,6 @@ async fn sync_directory(path: &Path) -> anyhow::Result<()> {
         .context("syncing the RPC checkpoint directory")
 }
 
-fn temporary_path(path: &Path) -> PathBuf {
-    let mut file_name = OsString::from(".");
-    file_name.push(
-        path.file_name()
-            .expect("the RPC checkpoint path must include a file name"),
-    );
-    file_name.push(".tmp");
-    path.with_file_name(file_name)
-}
-
 fn corrupt_path(path: &Path) -> PathBuf {
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -391,10 +381,9 @@ mod tests {
 
     use serde_json::Value;
     use solana_pubkey::Pubkey;
-    use solana_signature::Signature;
 
     use super::{CheckpointLoadOutcome, CheckpointStore};
-    use crate::rpc_polling::signatures::AddressCursor;
+    use crate::{rpc_polling::signatures::AddressCursor, test_support::signature};
 
     fn checkpoint_path() -> PathBuf {
         // Pubkey::new_unique restarts its sequence each process, so without the
@@ -406,12 +395,6 @@ mod tests {
                 Pubkey::new_unique()
             ))
             .join("rpc-polling.json")
-    }
-
-    fn signature(value: u64) -> Signature {
-        let mut bytes = [0; 64];
-        bytes[..8].copy_from_slice(&value.to_le_bytes());
-        Signature::from(bytes)
     }
 
     fn store(path: PathBuf, addresses: Vec<String>, replay_window_slots: u64) -> CheckpointStore {

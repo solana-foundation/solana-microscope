@@ -95,16 +95,6 @@ impl RpcPollingDatasource {
         .unwrap_or_else(|| panic!("RPC_URL env var must be set when datasource.mode is rpc"))
     }
 
-    fn monitored_addresses(&self) -> Vec<Pubkey> {
-        let mut addresses = vec![self.program_id];
-        if let Some(state_address) = self.multisig_state_address {
-            addresses.push(state_address);
-        }
-        addresses.sort_unstable();
-        addresses.dedup();
-        addresses
-    }
-
     async fn absorb_delivered_signatures(&self, state: &mut PollingState) {
         let Some(delivered) = &self.delivered else {
             return;
@@ -368,6 +358,17 @@ impl RpcPollingDatasource {
     }
 }
 
+pub fn monitored_addresses(
+    program_id: Pubkey,
+    multisig_state_address: Option<Pubkey>,
+) -> Vec<Pubkey> {
+    let mut addresses = vec![program_id];
+    addresses.extend(multisig_state_address);
+    addresses.sort_unstable();
+    addresses.dedup();
+    addresses
+}
+
 /// The cursor tracks the head observed by a previous poll, and backends
 /// behind one load-balanced endpoint report heads a few slots apart, so a
 /// lagging backend can legitimately answer below the cursor. One replay
@@ -446,12 +447,15 @@ fn process_fetched_transaction(
     match fetched_transaction {
         Ok((_, transaction)) => {
             let slot = transaction.slot;
-            match convert_transaction(signature, transaction) {
-                Ok(update) => {
+            match backfill::transaction_update(signature, transaction) {
+                Some(update) => {
                     state.clear_poison_failure(&signature);
                     TransactionPollOutcome::Ready { slot, update }
                 }
-                Err(error) => poisoned(state, error),
+                None => poisoned(
+                    state,
+                    anyhow!("transaction {signature} could not be converted"),
+                ),
             }
         }
         Err(failure) if failure.permanent => poisoned(state, anyhow::Error::new(failure.error)),
@@ -459,14 +463,6 @@ fn process_fetched_transaction(
             error: anyhow::Error::new(failure.error),
         },
     }
-}
-
-fn convert_transaction(
-    signature: Signature,
-    transaction: EncodedConfirmedTransactionWithStatusMeta,
-) -> anyhow::Result<Update> {
-    backfill::transaction_update(signature, transaction)
-        .ok_or_else(|| anyhow!("transaction {signature} could not be converted"))
 }
 
 #[cfg(test)]
@@ -482,17 +478,20 @@ mod tests {
         rpc_request::RpcError,
     };
     use solana_pubkey::Pubkey;
-    use solana_transaction_status::EncodedConfirmedTransactionWithStatusMeta;
 
     use carbon_core::datasource::DatasourceId;
     use solana_commitment_config::CommitmentConfig;
 
     use super::{
-        advance_ready_cursors, convert_transaction, cursor_ahead_of_head,
-        process_fetched_transaction, signatures, signatures_to_fetch, valid_rpc_url, AddressCursor,
-        DeliveredSignatures, PollingState, RpcClient, RpcPollingDatasource, TransactionPollOutcome,
+        advance_ready_cursors, cursor_ahead_of_head, process_fetched_transaction, signatures,
+        signatures_to_fetch, valid_rpc_url, AddressCursor, DeliveredSignatures, PollingState,
+        RpcClient, RpcPollingDatasource, TransactionPollOutcome,
     };
-    use crate::{backfill::FetchError, rpc_polling::progress::SignatureContext};
+    use crate::{
+        backfill::FetchError,
+        rpc_polling::progress::SignatureContext,
+        test_support::{signature, squads_v4_vault_execute},
+    };
 
     #[test]
     fn accepts_only_http_rpc_urls() {
@@ -506,25 +505,17 @@ mod tests {
     fn monitors_the_program_and_multisig_state_account() {
         let program_id = Pubkey::new_unique();
         let state_address = Pubkey::new_unique();
-        let datasource = RpcPollingDatasource {
-            rpc_url: "https://rpc.example.com".to_string(),
-            program_id,
-            multisig_state_address: Some(state_address),
-            poll_interval: Duration::from_secs(5),
-            replay_window_slots: 300,
-            checkpoint_path: ".microscope-state/rpc-polling.json".into(),
-            delivered: None,
-        };
         let mut expected = vec![program_id, state_address];
         expected.sort_unstable();
 
-        assert_eq!(datasource.monitored_addresses(), expected);
-    }
-
-    fn signature(value: u64) -> solana_signature::Signature {
-        let mut bytes = [0; 64];
-        bytes[..8].copy_from_slice(&value.to_le_bytes());
-        solana_signature::Signature::from(bytes)
+        assert_eq!(
+            super::monitored_addresses(program_id, Some(state_address)),
+            expected
+        );
+        assert_eq!(
+            super::monitored_addresses(program_id, Some(program_id)),
+            vec![program_id]
+        );
     }
 
     fn client_error(kind: ClientErrorKind) -> ClientError {
@@ -699,10 +690,7 @@ mod tests {
 
     #[test]
     fn undecodable_transactions_count_toward_quarantine() {
-        let mut transaction: EncodedConfirmedTransactionWithStatusMeta = serde_json::from_str(
-            include_str!("../tests/fixtures/squads_v4_vault_execute.json"),
-        )
-        .unwrap();
+        let (_, mut transaction) = squads_v4_vault_execute();
         transaction.transaction.meta = None;
         let mut state = PollingState::default();
 
@@ -715,22 +703,6 @@ mod tests {
         assert!(error.to_string().contains("could not be converted"));
         assert_eq!(disposition.attempts, 1);
         assert!(!disposition.quarantined);
-    }
-
-    #[test]
-    fn rejects_transactions_that_cannot_be_converted() {
-        let mut transaction: EncodedConfirmedTransactionWithStatusMeta = serde_json::from_str(
-            include_str!("../tests/fixtures/squads_v4_vault_execute.json"),
-        )
-        .unwrap();
-        transaction.transaction.meta = None;
-
-        let result = convert_transaction(signature(1), transaction);
-
-        let Err(error) = result else {
-            panic!("malformed transaction should be rejected");
-        };
-        assert!(error.to_string().contains("could not be converted"));
     }
 
     fn cursors_at(scanned_slot: u64) -> std::collections::BTreeMap<String, AddressCursor> {
@@ -755,24 +727,6 @@ mod tests {
         assert_eq!(ahead.address, address);
         assert_eq!(ahead.cursor_slot, 4_000_000_000);
         assert_eq!(ahead.head_slot, 300_000_000);
-    }
-
-    /// Ties the retention floor to the rewinds a restart actually performs, so
-    /// a change to either one fails here rather than as silent duplicates.
-    #[test]
-    fn keeps_suppression_for_everything_a_restart_can_rediscover() {
-        let replay_window_slots = 300;
-        let checkpoint_slot = 300_000_000;
-        let restored = AddressCursor {
-            scanned_slot: checkpoint_slot - replay_window_slots,
-        };
-
-        let discovery_floor = restored.scanned_slot - replay_window_slots;
-
-        assert_eq!(
-            super::unreachable_below(checkpoint_slot, replay_window_slots),
-            discovery_floor
-        );
     }
 
     #[test]

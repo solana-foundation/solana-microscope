@@ -5,34 +5,20 @@ use tokio::sync::mpsc::UnboundedSender;
 const STRUCTURED_TARGET_PREFIX: &str = "microscope::";
 const REDACTED_QUERY: &str = "?<redacted>";
 
-pub fn init() {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .format(|buffer, record| {
-            if is_structured_target(record.target()) {
-                writeln!(buffer, "{}", record.args())
-            } else {
-                writeln!(
-                    buffer,
-                    "{} {:<5} [{}] {}",
-                    buffer.timestamp(),
-                    record.level(),
-                    record.target(),
-                    redact_url_queries(&record.args().to_string())
-                )
-            }
-        })
-        .init();
-}
-
-/// Backfill mode: structured records are diverted to the sink for a
+/// With a sink (backfill mode), structured records are diverted to it for a
 /// backdated Loki push instead of stdout, where Alloy would re-ingest them
 /// with the current time. Everything else logs normally.
-pub fn init_with_record_sink(sink: UnboundedSender<Option<String>>) {
+pub fn init(record_sink: Option<UnboundedSender<Option<String>>>) {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .format(move |buffer, record| {
             if is_structured_target(record.target()) {
-                let _ = sink.send(Some(record.args().to_string()));
-                Ok(())
+                match &record_sink {
+                    Some(sink) => {
+                        let _ = sink.send(Some(record.args().to_string()));
+                        Ok(())
+                    }
+                    None => writeln!(buffer, "{}", record.args()),
+                }
             } else {
                 writeln!(
                     buffer,

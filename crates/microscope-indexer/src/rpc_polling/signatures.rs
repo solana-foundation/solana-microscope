@@ -130,12 +130,7 @@ fn append_signature_page<'a>(
 #[cfg(test)]
 mod tests {
     use super::{append_signature_page, min_context_slot, AddressCursor, REPLICA_SKEW_SLOTS};
-
-    fn signature(value: u64) -> solana_signature::Signature {
-        let mut bytes = [0; 64];
-        bytes[..8].copy_from_slice(&value.to_le_bytes());
-        solana_signature::Signature::from(bytes)
-    }
+    use crate::test_support::signature;
 
     #[test]
     fn leaves_a_lagging_replica_inside_the_window_the_next_poll_rescans() {

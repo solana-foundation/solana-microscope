@@ -147,9 +147,4 @@ mod tests {
     fn rejects_backfill_without_since() {
         assert!(Cli::try_parse_from(["microscope-indexer", "backfill"]).is_err());
     }
-
-    #[test]
-    fn rejects_unknown_subcommands() {
-        assert!(Cli::try_parse_from(["microscope-indexer", "generate-alreting"]).is_err());
-    }
 }

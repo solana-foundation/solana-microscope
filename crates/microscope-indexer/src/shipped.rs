@@ -1,11 +1,10 @@
 use std::{
     collections::HashSet,
-    ffi::OsString,
     fs::{File, OpenOptions},
     io::{ErrorKind, Write},
     path::{Path, PathBuf},
     str::FromStr,
-    sync::{Mutex, OnceLock},
+    sync::{Mutex, MutexGuard, OnceLock},
 };
 
 use anyhow::Context;
@@ -15,6 +14,8 @@ use carbon_core::{
 };
 use serde::Serialize;
 use solana_signature::Signature;
+
+use crate::files::temporary_path;
 
 /// Records each transaction once its records are logged, so a restart cannot
 /// replay it. The in-memory deduplication filter dies with the process and the
@@ -52,7 +53,6 @@ pub(crate) fn install(path: PathBuf) {
 /// the transaction, the one point where all of its records are logged.
 /// Journalling from an instruction processor would let a restart suppress
 /// records the later instructions never got to emit.
-#[derive(Default)]
 pub struct ShippedProcessor;
 
 impl Processor<TransactionProcessorInputType<'_, NoInstructions>> for ShippedProcessor {
@@ -80,14 +80,19 @@ impl InstructionDecoderCollection for NoInstructions {
     fn get_type(&self) -> Self::InstructionType {}
 }
 
-fn record(signature: Signature, slot: u64) {
-    let Some(journal) = JOURNAL.get() else {
-        return;
-    };
-    let mut state = journal
+fn locked_journal() -> Option<(&'static Journal, MutexGuard<'static, JournalState>)> {
+    let journal = JOURNAL.get()?;
+    let state = journal
         .state
         .lock()
         .expect("the shipped journal is poisoned");
+    Some((journal, state))
+}
+
+fn record(signature: Signature, slot: u64) {
+    let Some((journal, mut state)) = locked_journal() else {
+        return;
+    };
     if !state.written.insert(signature) {
         return;
     }
@@ -98,13 +103,9 @@ fn record(signature: Signature, slot: u64) {
 }
 
 pub(crate) fn restore(identity: String) -> Vec<(Signature, u64)> {
-    let Some(journal) = JOURNAL.get() else {
+    let Some((journal, mut state)) = locked_journal() else {
         return Vec::new();
     };
-    let mut state = journal
-        .state
-        .lock()
-        .expect("the shipped journal is poisoned");
     let entries = match read_journal(&journal.path) {
         Ok((header, entries)) if header.as_deref() == Some(identity.as_str()) => entries,
         Ok((header, _)) => {
@@ -133,13 +134,9 @@ pub(crate) fn restore(identity: String) -> Vec<(Signature, u64)> {
 /// Drops a journal that has no checkpoint to vouch for it: entries with no
 /// durable progress behind them suppress nothing a restart can rediscover.
 pub(crate) fn discard(identity: String) {
-    let Some(journal) = JOURNAL.get() else {
+    let Some((journal, mut state)) = locked_journal() else {
         return;
     };
-    let mut state = journal
-        .state
-        .lock()
-        .expect("the shipped journal is poisoned");
     let purged = journal.purge(&mut state);
     state.identity = Some(identity);
     match purged {
@@ -158,13 +155,9 @@ pub(crate) fn discard(identity: String) {
 /// Mirrors the checkpoint's recent-signature retention: below the replay floor
 /// the poller cannot rediscover the transaction, so the entry suppresses nothing.
 pub(crate) fn compact(minimum_slot: u64) {
-    let Some(journal) = JOURNAL.get() else {
+    let Some((journal, mut state)) = locked_journal() else {
         return;
     };
-    let mut state = journal
-        .state
-        .lock()
-        .expect("the shipped journal is poisoned");
     if let Err(error) = journal.rewrite(&mut state, minimum_slot) {
         log::warn!(
             "failed to compact the shipped-transaction journal {}: {error:#}",
@@ -319,16 +312,6 @@ fn parse_entry(line: &str) -> Option<(Signature, u64)> {
     Some((Signature::from_str(signature).ok()?, slot.parse().ok()?))
 }
 
-fn temporary_path(path: &Path) -> PathBuf {
-    let mut file_name = OsString::from(".");
-    file_name.push(
-        path.file_name()
-            .expect("the shipped journal path must include a file name"),
-    );
-    file_name.push(".tmp");
-    path.with_file_name(file_name)
-}
-
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
@@ -336,16 +319,11 @@ mod tests {
     use solana_pubkey::Pubkey;
     use solana_signature::Signature;
 
-    use super::{read_journal, temporary_path, Journal, JournalState};
+    use super::{read_journal, Journal, JournalState};
+    use crate::{files::temporary_path, test_support::signature};
 
     fn entries(path: &Path) -> Vec<(Signature, u64)> {
         read_journal(path).unwrap().1
-    }
-
-    fn signature(value: u64) -> Signature {
-        let mut bytes = [0; 64];
-        bytes[..8].copy_from_slice(&value.to_le_bytes());
-        Signature::from(bytes)
     }
 
     fn journal() -> (Journal, PathBuf) {

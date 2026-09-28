@@ -220,37 +220,24 @@ fn transaction_filters(
     program_id: &str,
     multisig_state_address: Option<Pubkey>,
 ) -> HashMap<String, SubscribeRequestFilterTransactions> {
-    let mut transaction_filters = HashMap::new();
-    transaction_filters.insert(
-        "program".to_string(),
-        SubscribeRequestFilterTransactions {
-            vote: Some(false),
-            failed: None,
-            signature: None,
-            account_include: vec![],
-            account_exclude: vec![],
-            account_required: vec![program_id.to_string()],
-            cuckoo_account_include: None,
-            token_accounts: None,
-        },
-    );
-    let Some(state_address) = multisig_state_address else {
-        return transaction_filters;
+    let requiring = |address: String| SubscribeRequestFilterTransactions {
+        vote: Some(false),
+        failed: None,
+        signature: None,
+        account_include: vec![],
+        account_exclude: vec![],
+        account_required: vec![address],
+        cuckoo_account_include: None,
+        token_accounts: None,
     };
-    transaction_filters.insert(
-        "multisig_state".to_string(),
-        SubscribeRequestFilterTransactions {
-            vote: Some(false),
-            failed: None,
-            signature: None,
-            account_include: vec![],
-            account_exclude: vec![],
-            account_required: vec![state_address.to_string()],
-            cuckoo_account_include: None,
-            token_accounts: None,
-        },
-    );
-
+    let mut transaction_filters =
+        HashMap::from([("program".to_string(), requiring(program_id.to_string()))]);
+    if let Some(state_address) = multisig_state_address {
+        transaction_filters.insert(
+            "multisig_state".to_string(),
+            requiring(state_address.to_string()),
+        );
+    }
     transaction_filters
 }
 
@@ -274,9 +261,22 @@ mod tests {
         client, reconnect, record_disconnections, transaction_filters, RecordingDatasource,
         DEFAULT_CHANNEL_BUFFER_SIZE, STREAM_TIMEOUT,
     };
-    use crate::delivered::DeliveredSignatures;
+    use crate::{delivered::DeliveredSignatures, test_support::signature};
     use std::time::Duration;
     use yellowstone_grpc_client::ReconnectionPolicy;
+
+    fn transaction_update(signature: Signature, slot: u64) -> Update {
+        Update::Transaction(Box::new(TransactionUpdate {
+            signature,
+            transaction: Default::default(),
+            meta: TransactionStatusMeta::default(),
+            is_vote: false,
+            slot,
+            index: None,
+            block_time: None,
+            block_hash: None,
+        }))
+    }
 
     struct StubDatasource {
         updates: Vec<(Signature, u64)>,
@@ -291,16 +291,7 @@ mod tests {
             _cancellation_token: CancellationToken,
         ) -> CarbonResult<()> {
             for (signature, slot) in &self.updates {
-                let update = Update::Transaction(Box::new(TransactionUpdate {
-                    signature: *signature,
-                    transaction: Default::default(),
-                    meta: TransactionStatusMeta::default(),
-                    is_vote: false,
-                    slot: *slot,
-                    index: None,
-                    block_time: None,
-                    block_hash: None,
-                }));
+                let update = transaction_update(*signature, *slot);
                 let _ = sender.send((update, id.clone())).await;
             }
             Ok(())
@@ -327,16 +318,7 @@ mod tests {
             _cancellation_token: CancellationToken,
         ) -> CarbonResult<()> {
             for (signature, slot) in &self.updates {
-                let update = Update::Transaction(Box::new(TransactionUpdate {
-                    signature: *signature,
-                    transaction: Default::default(),
-                    meta: TransactionStatusMeta::default(),
-                    is_vote: false,
-                    slot: *slot,
-                    index: None,
-                    block_time: None,
-                    block_hash: None,
-                }));
+                let update = transaction_update(*signature, *slot);
                 if sender.try_send((update, id.clone())).is_err() {
                     self.rejected.lock().unwrap().push(*signature);
                 }
@@ -347,12 +329,6 @@ mod tests {
         fn update_types(&self) -> Vec<UpdateType> {
             vec![UpdateType::Transaction]
         }
-    }
-
-    fn signature(value: u64) -> Signature {
-        let mut bytes = [0; 64];
-        bytes[..8].copy_from_slice(&value.to_le_bytes());
-        Signature::from(bytes)
     }
 
     fn disconnection(missed_slots: u64) -> DatasourceDisconnection {

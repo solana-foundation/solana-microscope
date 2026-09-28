@@ -178,9 +178,6 @@ async fn flush(
     run_label: &str,
     batch: &[(i64, String)],
 ) -> anyhow::Result<u64> {
-    if batch.is_empty() {
-        return Ok(0);
-    }
     let values: Vec<[String; 2]> = batch
         .iter()
         .map(|(block_time, line)| {
@@ -319,9 +316,8 @@ impl Datasource for BackfillDatasource {
                             self.account
                         );
                     }
-                    let Some(update) =
-                        counted_transaction_update(signature, transaction, &self.crawl_failures)
-                    else {
+                    let Some(update) = transaction_update(signature, transaction) else {
+                        self.crawl_failures.fetch_add(1, Ordering::Relaxed);
                         return;
                     };
                     if let Err(error) = sender.send((update, id.clone())).await {
@@ -422,18 +418,6 @@ fn fetch_error_is_permanent(error: &ClientError) -> bool {
     )
 }
 
-pub(crate) fn counted_transaction_update(
-    signature: Signature,
-    fetched: EncodedConfirmedTransactionWithStatusMeta,
-    conversion_failures: &AtomicU32,
-) -> Option<Update> {
-    let update = transaction_update(signature, fetched);
-    if update.is_none() {
-        conversion_failures.fetch_add(1, Ordering::Relaxed);
-    }
-    update
-}
-
 pub(crate) fn transaction_update(
     signature: Signature,
     fetched: EncodedConfirmedTransactionWithStatusMeta,
@@ -503,16 +487,16 @@ mod tests {
     use solana_signature::Signature;
     use solana_transaction::versioned::VersionedTransaction;
     use solana_transaction_status::{
-        EncodedConfirmedTransactionWithStatusMeta, EncodedTransaction,
-        EncodedTransactionWithStatusMeta, TransactionBinaryEncoding, TransactionStatusMeta,
-        UiTransactionStatusMeta,
+        option_serializer::OptionSerializer, EncodedConfirmedTransactionWithStatusMeta,
+        EncodedTransaction, EncodedTransactionWithStatusMeta, TransactionBinaryEncoding,
+        TransactionStatusMeta, UiTransactionStatusMeta,
     };
 
     use super::{
         block_time_of, config_duration, config_flag, fetch_error_is_permanent, parse_duration,
         select_signatures, transaction_update,
     };
-    use crate::multisig::common::AddressResolver;
+    use crate::{multisig::common::AddressResolver, test_support::squads_v4_vault_execute};
 
     const FIXTURES: &[(&str, &str)] = &[
         (
@@ -617,14 +601,7 @@ mod tests {
 
     #[test]
     fn decodes_a_mainnet_squads_v4_vault_execute_through_the_backfill_path() {
-        let fetched: EncodedConfirmedTransactionWithStatusMeta = serde_json::from_str(
-            include_str!("../tests/fixtures/squads_v4_vault_execute.json"),
-        )
-        .expect("fixture deserializes");
-        let signature = Signature::from_str(
-            "DTJvwK9o6DjaUZs5NF598Qbhk89uahfXyorkXUWhhr8iH5x3QHbQAGum97LEUqzC7LiJ8FYeK19P2vJMKVo74DS",
-        )
-        .unwrap();
+        let (signature, fetched) = squads_v4_vault_execute();
 
         let update = transaction_update(signature, fetched).expect("fixture converts to an update");
         let Update::Transaction(update) = update else {
@@ -656,7 +633,6 @@ mod tests {
             .match_state(state_address)
             .expect("decoded instruction uses the resolved multisig state");
         assert_eq!(matched.state_address, state_address);
-        assert_eq!(matched.configured_address_kind, "default_vault");
     }
 
     #[test]
@@ -811,76 +787,32 @@ mod tests {
     }
 
     #[test]
-    fn counts_a_conversion_failure_when_meta_is_missing() {
-        let mut fetched: EncodedConfirmedTransactionWithStatusMeta = serde_json::from_str(
-            include_str!("../tests/fixtures/squads_v4_vault_execute.json"),
-        )
-        .expect("fixture deserializes");
-        fetched.transaction.meta = None;
-        let signature = Signature::from_str(
-            "DTJvwK9o6DjaUZs5NF598Qbhk89uahfXyorkXUWhhr8iH5x3QHbQAGum97LEUqzC7LiJ8FYeK19P2vJMKVo74DS",
-        )
-        .unwrap();
-        let conversion_failures = std::sync::atomic::AtomicU32::new(0);
+    fn skips_transactions_the_rpc_returned_without_complete_meta() {
+        let without_meta: fn(&mut EncodedConfirmedTransactionWithStatusMeta) =
+            |fetched| fetched.transaction.meta = None;
+        let without_inner_instructions: fn(&mut EncodedConfirmedTransactionWithStatusMeta) =
+            |fetched| {
+                fetched
+                    .transaction
+                    .meta
+                    .as_mut()
+                    .unwrap()
+                    .inner_instructions = OptionSerializer::None
+            };
+        let without_log_messages: fn(&mut EncodedConfirmedTransactionWithStatusMeta) = |fetched| {
+            fetched.transaction.meta.as_mut().unwrap().log_messages = OptionSerializer::None
+        };
 
-        let update = super::counted_transaction_update(signature, fetched, &conversion_failures);
+        for strip in [
+            without_meta,
+            without_inner_instructions,
+            without_log_messages,
+        ] {
+            let (signature, mut fetched) = squads_v4_vault_execute();
+            strip(&mut fetched);
 
-        assert!(update.is_none());
-        assert_eq!(
-            conversion_failures.load(std::sync::atomic::Ordering::Relaxed),
-            1
-        );
-    }
-
-    #[test]
-    fn counts_a_conversion_failure_when_inner_instructions_are_not_recorded() {
-        let mut fetched: EncodedConfirmedTransactionWithStatusMeta = serde_json::from_str(
-            include_str!("../tests/fixtures/squads_v4_vault_execute.json"),
-        )
-        .expect("fixture deserializes");
-        fetched
-            .transaction
-            .meta
-            .as_mut()
-            .unwrap()
-            .inner_instructions =
-            solana_transaction_status::option_serializer::OptionSerializer::None;
-        let signature = Signature::from_str(
-            "DTJvwK9o6DjaUZs5NF598Qbhk89uahfXyorkXUWhhr8iH5x3QHbQAGum97LEUqzC7LiJ8FYeK19P2vJMKVo74DS",
-        )
-        .unwrap();
-        let conversion_failures = std::sync::atomic::AtomicU32::new(0);
-
-        let update = super::counted_transaction_update(signature, fetched, &conversion_failures);
-
-        assert!(update.is_none());
-        assert_eq!(
-            conversion_failures.load(std::sync::atomic::Ordering::Relaxed),
-            1
-        );
-    }
-
-    #[test]
-    fn counts_a_conversion_failure_when_log_messages_are_not_recorded() {
-        let mut fetched: EncodedConfirmedTransactionWithStatusMeta = serde_json::from_str(
-            include_str!("../tests/fixtures/squads_v4_vault_execute.json"),
-        )
-        .expect("fixture deserializes");
-        fetched.transaction.meta.as_mut().unwrap().log_messages =
-            solana_transaction_status::option_serializer::OptionSerializer::None;
-        let signature = Signature::from_str(
-            "DTJvwK9o6DjaUZs5NF598Qbhk89uahfXyorkXUWhhr8iH5x3QHbQAGum97LEUqzC7LiJ8FYeK19P2vJMKVo74DS",
-        )
-        .unwrap();
-        let conversion_failures = std::sync::atomic::AtomicU32::new(0);
-
-        let update = super::counted_transaction_update(signature, fetched, &conversion_failures);
-
-        assert!(update.is_none());
-        assert_eq!(
-            conversion_failures.load(std::sync::atomic::Ordering::Relaxed),
-            1
-        );
+            assert!(transaction_update(signature, fetched).is_none());
+        }
     }
 
     fn client_error(kind: ClientErrorKind) -> ClientError {

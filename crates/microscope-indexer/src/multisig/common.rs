@@ -8,7 +8,6 @@ use crate::{instructions, telemetry};
 pub struct AddressMatch {
     pub configured_address: Pubkey,
     pub state_address: Pubkey,
-    pub configured_address_kind: &'static str,
     pub squads_version: &'static str,
 }
 
@@ -22,7 +21,6 @@ impl AddressResolver {
             resolved: AddressMatch {
                 configured_address: vault_address,
                 state_address,
-                configured_address_kind: "default_vault",
                 squads_version,
             },
         }
@@ -66,7 +64,7 @@ pub fn process<T: Serialize>(
                 "data": &instruction.data,
                 "vault_address": address_match.configured_address.to_string(),
                 "multisig_address": address_match.state_address.to_string(),
-                "configured_address_kind": address_match.configured_address_kind,
+                "configured_address_kind": "default_vault",
                 "program_id": input.raw_instruction.program_id.to_string(),
                 "instruction_index": input.metadata.index,
                 "instruction_path": instructions::occurrence_path(input.metadata),
@@ -101,7 +99,6 @@ mod tests {
 
         assert_eq!(matched.configured_address, vault);
         assert_eq!(matched.state_address, state);
-        assert_eq!(matched.configured_address_kind, "default_vault");
         assert_eq!(matched.squads_version, "v4");
         assert!(resolver.match_state(Pubkey::new_unique()).is_none());
         assert!(resolver.match_state(vault).is_none());

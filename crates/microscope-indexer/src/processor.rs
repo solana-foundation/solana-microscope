@@ -138,15 +138,8 @@ impl Processor<InstructionProcessorInputType<'_, ProgramInstruction>> for EventP
 
 #[cfg(test)]
 mod tests {
-    use solana_signature::Signature;
-
     use super::{EventProcessor, RECENT_SIGNATURE_CAPACITY};
-
-    fn signature(value: u64) -> Signature {
-        let mut bytes = [0; 64];
-        bytes[..8].copy_from_slice(&value.to_le_bytes());
-        Signature::from(bytes)
-    }
+    use crate::test_support::signature;
 
     #[test]
     fn suppresses_recent_duplicate_transactions() {
