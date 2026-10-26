@@ -1,6 +1,6 @@
-FROM node:24.18.0-trixie-slim@sha256:5301bbf5e8046148348b1dea15436326f43c579031f8d76654a631225bdfe467 AS node
+FROM node:24.18.1-trixie-slim@sha256:ac39e4b5fcb2b1b34b20364fd58b2e898f3bb80731ee6f62a7536f9df3d6aadc AS node
 
-FROM rust:1.97-slim-trixie@sha256:1ac626cf2baacc6c87631f4c224391d7f5b3d3e6ba16b1c0f640232d7db172c8 AS chef
+FROM rust:1.97-slim-trixie@sha256:8e8cf8f7fd54a2d23d5a743b3a03f56e26b6c774276c33fa0595111704ebb15c AS chef
 WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config libssl-dev build-essential python3 \
@@ -49,7 +49,7 @@ RUN cargo chef cook --release --recipe-path recipe.json -p microscope-indexer
 COPY . .
 RUN cargo build --release -p microscope-indexer
 
-FROM debian:trixie-slim@sha256:9bb8a3626890e084ab54e888fdd7c4b6d2f119071cd4c5dc5fecb4d73062aa5f
+FROM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad
 LABEL org.opencontainers.image.title="Solana Microscope" \
       org.opencontainers.image.description="Self-hosted monitoring and alerting for Solana programs" \
       org.opencontainers.image.source="https://github.com/solana-foundation/solana-microscope" \
