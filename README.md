@@ -134,7 +134,7 @@ version = "v4" # v3 | v4 | v5
 [datasource]
 mode = "yellowstone" # or "rpc"
 poll_interval_seconds = 5
-replay_window_slots = 300
+replay_window_slots = 600
 
 [dashboard]
 event_fields = ["name", "source", "signature", "slot", "failed", "data.amount"]
@@ -230,7 +230,7 @@ than endpoint cost:
 [datasource]
 mode = "rpc"
 poll_interval_seconds = 5
-replay_window_slots = 300
+replay_window_slots = 600
 ```
 
 Set `RPC_URL` and leave `GEYSER_URL` empty. RPC mode polls confirmed signatures

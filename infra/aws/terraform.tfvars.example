@@ -17,7 +17,7 @@ idl_path = "../../idl/idl1.json"
 datasource = {
   mode                  = "yellowstone"
   poll_interval_seconds = 5
-  replay_window_slots   = 300
+  replay_window_slots   = 600
 }
 geyser_url             = "https://your-yellowstone-endpoint:443"
 geyser_x_token         = "replace-me"

@@ -69,7 +69,7 @@ Yellowstone remains the default:
 ```hcl
 datasource = {
   mode                = "yellowstone"
-  replay_window_slots = 300
+  replay_window_slots = 600
 }
 geyser_url     = "https://your-yellowstone-endpoint:443"
 geyser_x_token = "..."
@@ -86,7 +86,7 @@ Use RPC-only polling without a gRPC endpoint:
 datasource = {
   mode                  = "rpc"
   poll_interval_seconds = 5
-  replay_window_slots   = 300
+  replay_window_slots   = 600
 }
 rpc_url        = "https://your-solana-rpc-endpoint"
 geyser_url     = ""
