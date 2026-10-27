@@ -14,7 +14,7 @@ idl_path = "idl/idl1.json"
 # [datasource]
 # mode = "rpc"
 # poll_interval_seconds = 5
-# replay_window_slots = 300
+# replay_window_slots = 600
 
 # Optional: override the built-in event and multisig table columns with JSON paths.
 # Missing paths are empty cells; raw JSON remains available in Loki.

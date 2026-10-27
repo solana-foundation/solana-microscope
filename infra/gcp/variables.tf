@@ -66,7 +66,7 @@ variable "datasource" {
   type = object({
     mode                  = optional(string, "yellowstone")
     poll_interval_seconds = optional(number, 5)
-    replay_window_slots   = optional(number, 300)
+    replay_window_slots   = optional(number, 600)
   })
   default = {}
 

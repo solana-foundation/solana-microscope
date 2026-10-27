@@ -1259,7 +1259,7 @@ mod tests {
             lag["data"][0]["model"]["expr"],
             "microscope_rpc_poll_lag_slots"
         );
-        assert_eq!(lag["data"][2]["model"]["expression"], "$B > 600");
+        assert_eq!(lag["data"][2]["model"]["expression"], "$B > 1200");
         assert_eq!(lag["labels"]["severity"], "warning");
         assert_eq!(
             quarantine["data"][0]["model"]["expr"],

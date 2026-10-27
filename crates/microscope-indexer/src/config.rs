@@ -320,7 +320,7 @@ impl Default for DatasourceConfig {
         Self {
             mode: DatasourceMode::Yellowstone,
             poll_interval_seconds: 5,
-            replay_window_slots: 300,
+            replay_window_slots: 600,
         }
     }
 }
@@ -928,7 +928,7 @@ state_address = "11111111111111111111111111111111""#
         assert_eq!(default.datasource.mode, DatasourceMode::Yellowstone);
         assert_eq!(default.datasource.poll_interval_seconds, 5);
         assert_eq!(default.datasource.rpc_poll_stale_after_seconds(), 60);
-        assert_eq!(default.datasource.replay_window_slots, 300);
+        assert_eq!(default.datasource.replay_window_slots, 600);
 
         let rpc: Wrapper = toml::from_str(
             r#"[datasource]

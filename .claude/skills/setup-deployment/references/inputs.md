@@ -16,7 +16,7 @@ Validate each answer as it arrives using the same rules Terraform enforces at pl
 | `geyser_x_token` | optional in Yellowstone mode; empty is fine |
 | `rpc_url` | required in RPC mode and by the backfill command; optional in Yellowstone mode, where setting it enables disconnect and restart recovery and is recommended |
 | `poll_interval_seconds` | RPC polling or reconciliation interval; 1-300 seconds, default 5 |
-| `replay_window_slots` | crash-safety overlap replayed on first start and restart; 1-100,000 slots, default 300 |
+| `replay_window_slots` | crash-safety overlap replayed on first start and restart; 1-100,000 slots, default 600 |
 | `grafana_admin_password` | >= 12 chars; offer to generate one with `openssl rand -base64 18` |
 
 `idl_path` is relative to the repo root for local, and to `infra/<cloud>/` for cloud (e.g. `../../idl/my-program.json`).
@@ -38,6 +38,6 @@ Mention that each can be changed later:
 - `name`, `instance_type`/`machine_type`, `disk_size_gb`, `repository_url`, `repository_ref`: keep the variable defaults.
 - AWS `region` defaults to `us-east-2`; GCP `region`/`zone` default to `us-central1`/`us-central1-a`. Ask only if the user cares where it runs.
 - Yellowstone is the default datasource; keep it when the operator has no preference.
-- RPC polling and Yellowstone reconciliation default to 5 seconds with a 300-slot crash replay window.
+- RPC polling and Yellowstone reconciliation default to 5 seconds with a 600-slot crash replay window.
 - Alert timing: keep the global defaults (`lookback_window_seconds = 60`, `evaluation_interval_seconds = 10`).
 - An alert with empty `channels` is valid: it evaluates in Grafana through a muted contact point, useful before credentials exist.
