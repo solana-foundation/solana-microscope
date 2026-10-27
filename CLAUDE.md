@@ -21,12 +21,18 @@ Carbon pins several deps with `=`, so a carbon bump can force microscope's floor
 up (`solana-transaction-status`, `solana-client`, `yellowstone-grpc-{client,proto}`).
 A `cargo check` failing on "all possible versions conflict" is that, not a real break.
 
-### Decoder crates are generated, never committed
+### Decoder crates are generated, only their manifests are committed
 
 `crates/{program,squads-v3,squads-v4,squads-smart-account}-decoder/` are gitignored
 output of `scripts/generate-decoder.sh` (`just generate`), which needs
 `microscope.toml` to exist. Each has its own `[workspace]` and is in the root
 `exclude` list.
+
+- Each crate's generated `Cargo.toml` is committed anyway, because Dependabot
+  never runs the generator and its cargo updates fail on a missing path dep.
+  Commit them as the generator emits them for `microscope.toml.example`, so the
+  committed `Cargo.lock` matches a real build. A different IDL can change
+  `program-decoder/Cargo.toml` locally; do not commit that.
 
 - Every Justfile target that compiles depends on `generate` first. Bare `cargo build`
   on a fresh clone fails.
