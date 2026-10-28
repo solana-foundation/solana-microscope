@@ -15,7 +15,7 @@
         "@sevenlabs-hq/carbon-codama-renderer": "2.0.0"
     },
     "overrides": {
-        "toml": "^5.0.0",
+        "toml": "^5.0.1",
         "jayson": {
             "uuid": "^11.1.1"
         }
