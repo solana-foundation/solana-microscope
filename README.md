@@ -196,6 +196,11 @@ exact instruction occurrence within the transaction; they are usable in
 dashboard fields and alert conditions like any other field. An alert with no channels remains
 visible in Grafana but does not send notifications.
 
+Event, instruction and multisig alerts notify Slack and Telegram once per
+match, with no "resolved" message when the match leaves the lookback window.
+Health alerts still send one when they recover. PagerDuty gets the resolved
+message for both, because it is what closes the incident.
+
 See [`microscope.toml.example`](microscope.toml.example) for all options.
 
 ## Datasource modes
@@ -524,7 +529,10 @@ curl -X PUT "$GRAFANA_URL/api/v1/provisioning/alert-rules/$(jq -r .uid rule.json
 ```
 
 Contact-point JSON keeps `$SLACK_WEBHOOK_URL`-style placeholders; substitute
-real secrets only at push time, never in the committed files.
+real secrets only at push time, never in the committed files. Slack and
+Telegram export two contact points each: `<deployment>-<channel>` for health
+alerts and `<deployment>-<channel>-activity`, which sends no resolved message,
+for activity alerts.
 
 Pushing only creates and updates. Rules and contact points that disappear from
 an export stay active in the tenant, and because rule UIDs are content-derived,

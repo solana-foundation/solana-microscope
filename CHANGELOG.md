@@ -8,6 +8,14 @@ version and the section heading below.
 
 ## [Unreleased]
 
+### Fixed
+
+- Event, instruction and multisig alerts on Slack and Telegram no longer send
+  a second "resolved" notification after every match. They go to a new
+  `microscope-<channel>-activity` contact point with resolved messages off;
+  health alerts keep `microscope-<channel>` and still notify on recovery.
+  PagerDuty is unchanged.
+
 ## [0.1.0] — 2026-09-14
 
 Initial public release.

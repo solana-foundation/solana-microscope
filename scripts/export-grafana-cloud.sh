@@ -22,8 +22,9 @@ points, and mute timings through the Grafana provisioning API. Merge
 <deployment>-routes.json into the shared notification-policy tree by
 hand; it is not a standalone resource.
 
-Every exported rule names <deployment>-<channel> as its receiver, so
-push the contact points before the rules: a rule whose receiver does
+Every exported rule names <deployment>-<channel> as its receiver, or
+<deployment>-<channel>-activity for Slack and Telegram activity alerts,
+so push the contact points before the rules: a rule whose receiver does
 not exist is rejected. Rules for a deployment whose contact points are
 named differently need that receiver rewritten before the push.
 

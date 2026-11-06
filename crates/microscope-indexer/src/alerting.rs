@@ -198,7 +198,10 @@ fn provisioning_document(
         }],
     })];
     for channel in channels {
-        contact_points.push(contact_point(*channel));
+        contact_points.push(contact_point(*channel, false));
+        if activity_skips_resolve(*channel) {
+            contact_points.push(contact_point(*channel, true));
+        }
     }
 
     let mut routes = vec![json!({
@@ -207,13 +210,23 @@ fn provisioning_document(
         "mute_time_intervals": ["microscope-always"],
         "continue": false,
     })];
-    routes.extend(channels.iter().map(|channel| {
-        json!({
-            "receiver": format!("microscope-{channel}"),
+    for channel in channels {
+        if activity_skips_resolve(*channel) {
+            routes.push(json!({
+                "receiver": receiver(*channel, true),
+                "object_matchers": [
+                    ["channel", "=", channel.as_str()],
+                    ["signal_kind", "!=", "datasource"],
+                ],
+                "continue": false,
+            }));
+        }
+        routes.push(json!({
+            "receiver": receiver(*channel, false),
             "object_matchers": [["channel", "=", channel.as_str()]],
             "continue": false,
-        })
-    }));
+        }));
+    }
 
     Ok(json!({
         "apiVersion": 1,
@@ -270,6 +283,21 @@ fn health_channel_names(channels: &BTreeSet<AlertChannel>) -> Vec<&str> {
 /// through the tree, where the always-on mute timing lives.
 fn notification_settings(channel: &str) -> Option<Value> {
     (channel != "none").then(|| json!({ "receiver": format!("microscope-{channel}") }))
+}
+
+const fn activity_skips_resolve(channel: AlertChannel) -> bool {
+    match channel {
+        AlertChannel::Slack | AlertChannel::Telegram => true,
+        AlertChannel::Pagerduty => false,
+    }
+}
+
+fn receiver(channel: AlertChannel, activity: bool) -> String {
+    if activity && activity_skips_resolve(channel) {
+        format!("microscope-{channel}-activity")
+    } else {
+        format!("microscope-{channel}")
+    }
 }
 
 fn rpc_recovery_degraded_rules(
@@ -687,9 +715,9 @@ fn health_rule(
 fn grafana_rule(
     config: &Config,
     alert: &AlertRule,
-    channel: Option<AlertChannel>,
+    alert_channel: Option<AlertChannel>,
 ) -> anyhow::Result<Value> {
-    let channel = channel.map(AlertChannel::as_str).unwrap_or("none");
+    let channel = alert_channel.map(AlertChannel::as_str).unwrap_or("none");
     let query = logql_query(config, alert)?;
     let lookback_window_seconds = alert.lookback_window_seconds(&config.alerting);
     let conditions = serde_json::to_string(&alert.conditions)?;
@@ -756,8 +784,8 @@ fn grafana_rule(
         },
         "isPaused": false,
     });
-    if let Some(settings) = notification_settings(channel) {
-        rule["notification_settings"] = settings;
+    if let Some(channel) = alert_channel {
+        rule["notification_settings"] = json!({ "receiver": receiver(channel, true) });
     }
 
     Ok(rule)
@@ -911,7 +939,7 @@ fn condition_description(condition: &AlertCondition) -> anyhow::Result<String> {
     ))
 }
 
-fn contact_point(channel: AlertChannel) -> Value {
+fn contact_point(channel: AlertChannel, activity: bool) -> Value {
     let settings = match channel {
         AlertChannel::Slack => json!({ "url": "$SLACK_WEBHOOK_URL" }),
         AlertChannel::Telegram => json!({
@@ -924,14 +952,15 @@ fn contact_point(channel: AlertChannel) -> Value {
         }),
     };
 
+    let name = receiver(channel, activity);
     json!({
         "orgId": 1,
-        "name": format!("microscope-{channel}"),
+        "name": name,
         "receivers": [{
-            "uid": format!("microscope-{channel}"),
+            "uid": name,
             "type": channel.as_str(),
             "settings": settings,
-            "disableResolveMessage": false,
+            "disableResolveMessage": activity && activity_skips_resolve(channel),
         }],
     })
 }
@@ -962,7 +991,7 @@ fn validate_contact_point_credentials(channels: &BTreeSet<AlertChannel>) -> anyh
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
 
     use crate::config::{
         AlertChannel, AlertCondition, AlertConditionOperator, AlertConditionValue, AlertKind,
@@ -1638,12 +1667,167 @@ mod tests {
         assert!(rules.len() > 1);
 
         for rule in rules {
+            let receiver = if rule["labels"]["signal_kind"] == "datasource" {
+                "microscope-slack"
+            } else {
+                "microscope-slack-activity"
+            };
             assert_eq!(
-                rule["notification_settings"]["receiver"], "microscope-slack",
+                rule["notification_settings"]["receiver"], receiver,
                 "{}",
                 rule["title"]
             );
         }
+    }
+
+    /// An activity rule matches for one lookback window, then its series goes
+    /// away and Grafana resolves it, so a resolved message would follow every
+    /// match. Health alerts still say when they recover.
+    #[test]
+    fn gives_activity_alerts_a_contact_point_without_resolved_messages() {
+        let channels = BTreeSet::from([
+            AlertChannel::Slack,
+            AlertChannel::Telegram,
+            AlertChannel::Pagerduty,
+        ]);
+        let document = provisioning_document(&config(vec![]), &channels, false).unwrap();
+        let contact_points = document["contactPoints"].as_array().unwrap();
+
+        let disable_resolve = contact_points
+            .iter()
+            .map(|contact_point| {
+                (
+                    contact_point["name"].as_str().unwrap(),
+                    contact_point["receivers"][0]["disableResolveMessage"]
+                        .as_bool()
+                        .unwrap(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            disable_resolve,
+            BTreeMap::from([
+                ("microscope-noop", true),
+                ("microscope-pagerduty", false),
+                ("microscope-slack", false),
+                ("microscope-slack-activity", true),
+                ("microscope-telegram", false),
+                ("microscope-telegram-activity", true),
+            ])
+        );
+
+        let receiver = |name: &str| {
+            contact_points
+                .iter()
+                .find(|contact_point| contact_point["name"] == name)
+                .unwrap()["receivers"][0]
+                .clone()
+        };
+        let telegram = receiver("microscope-telegram");
+        let activity = receiver("microscope-telegram-activity");
+        assert_eq!(activity["uid"], "microscope-telegram-activity");
+        assert_eq!(activity["type"], "telegram");
+        assert_eq!(activity["settings"], telegram["settings"]);
+    }
+
+    #[test]
+    fn routes_every_activity_kind_on_telegram_to_its_activity_contact_point() {
+        let channels = BTreeSet::from([AlertChannel::Telegram]);
+        let document = provisioning_document(
+            &config(vec![
+                alert_with_channel(AlertKind::Event, "created", AlertChannel::Telegram),
+                alert_with_channel(AlertKind::Instruction, "transfer", AlertChannel::Telegram),
+                alert_with_channel(
+                    AlertKind::Multisig,
+                    "proposal_approved",
+                    AlertChannel::Telegram,
+                ),
+            ]),
+            &channels,
+            false,
+        )
+        .unwrap();
+
+        let receivers = rules(&document)
+            .map(|rule| {
+                (
+                    rule["labels"]["signal_kind"].as_str().unwrap(),
+                    rule["notification_settings"]["receiver"].as_str().unwrap(),
+                )
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            receivers,
+            BTreeSet::from([
+                ("datasource", "microscope-telegram"),
+                ("event", "microscope-telegram-activity"),
+                ("instruction", "microscope-telegram-activity"),
+                ("multisig", "microscope-telegram-activity"),
+            ])
+        );
+    }
+
+    /// PagerDuty closes an incident only on the resolve event. Without one, the
+    /// incident stays open and later matches join it instead of opening a new one.
+    #[test]
+    fn keeps_pagerduty_activity_alerts_on_the_resolving_contact_point() {
+        let channels = BTreeSet::from([AlertChannel::Pagerduty]);
+        let document = provisioning_document(
+            &config(vec![alert_with_channel(
+                AlertKind::Event,
+                "created",
+                AlertChannel::Pagerduty,
+            )]),
+            &channels,
+            false,
+        )
+        .unwrap();
+
+        let event = rules(&document)
+            .find(|rule| rule["labels"]["signal_kind"] == "event")
+            .unwrap();
+        assert_eq!(
+            event["notification_settings"]["receiver"],
+            "microscope-pagerduty"
+        );
+    }
+
+    /// Routes are tried in order and the first match stops the walk, so the
+    /// activity route has to come before the channel's catch-all.
+    #[test]
+    fn routes_activity_alerts_ahead_of_the_channel_route_in_the_policy_tree() {
+        let channels = BTreeSet::from([AlertChannel::Telegram, AlertChannel::Pagerduty]);
+        let document = provisioning_document(&config(vec![]), &channels, false).unwrap();
+
+        assert_eq!(
+            document["policies"][0]["routes"],
+            serde_json::json!([
+                {
+                    "receiver": "microscope-noop",
+                    "object_matchers": [["channel", "=", "none"]],
+                    "mute_time_intervals": ["microscope-always"],
+                    "continue": false,
+                },
+                {
+                    "receiver": "microscope-telegram-activity",
+                    "object_matchers": [
+                        ["channel", "=", "telegram"],
+                        ["signal_kind", "!=", "datasource"],
+                    ],
+                    "continue": false,
+                },
+                {
+                    "receiver": "microscope-telegram",
+                    "object_matchers": [["channel", "=", "telegram"]],
+                    "continue": false,
+                },
+                {
+                    "receiver": "microscope-pagerduty",
+                    "object_matchers": [["channel", "=", "pagerduty"]],
+                    "continue": false,
+                },
+            ])
+        );
     }
 
     #[test]
@@ -1714,7 +1898,10 @@ mod tests {
 
         assert_eq!(
             current["deleteContactPoints"],
-            serde_json::json!([{ "orgId": 1, "uid": "microscope-slack" }])
+            serde_json::json!([
+                { "orgId": 1, "uid": "microscope-slack" },
+                { "orgId": 1, "uid": "microscope-slack-activity" },
+            ])
         );
         assert_eq!(
             deletion_uids(&current, "deleteRules"),
