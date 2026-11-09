@@ -8,6 +8,23 @@ version and the section heading below.
 
 ## [Unreleased]
 
+### Fixed
+
+- Event, instruction and multisig alerts on Slack and Telegram no longer send
+  a second "resolved" notification after every match. They go to a new
+  `microscope-<channel>-activity` contact point with resolved messages off;
+  health alerts keep `microscope-<channel>` and still notify on recovery.
+  PagerDuty is unchanged.
+- The notification-policy tree no longer declares per-channel routes. Rules
+  with a channel name their contact point, and Grafana routes them before the
+  tree, so those routes were never used. `<deployment>-routes.json` now holds
+  only the route that mutes alerts without a channel, so Grafana Cloud users
+  have nothing per channel to merge.
+- `scripts/export-grafana-cloud.sh` fails before writing anything when the
+  dashboard or a contact point UID would exceed Grafana's 40-character limit.
+  The dashboard UID alone caps deployment names at 29 characters; with
+  `-telegram-activity`, names longer than 22 characters hit it.
+
 ## [0.1.0] — 2026-09-14
 
 Initial public release.
