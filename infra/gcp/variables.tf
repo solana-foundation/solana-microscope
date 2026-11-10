@@ -109,6 +109,26 @@ variable "geyser_x_token" {
   default     = ""
 }
 
+variable "geyser_fallbacks" {
+  description = "Optional Yellowstone gRPC endpoints from other providers, in priority order. The stream fails over to them when geyser_url stops answering."
+  type = list(object({
+    url     = string
+    x_token = optional(string, "")
+  }))
+  sensitive = true
+  default   = []
+
+  validation {
+    condition = alltrue([
+      for fallback in var.geyser_fallbacks :
+      (startswith(fallback.url, "https://") || startswith(fallback.url, "http://")) &&
+      !strcontains(fallback.url, ",") &&
+      !strcontains(fallback.x_token, ",")
+    ])
+    error_message = "Every geyser_fallbacks url must be an HTTP(S) URL, and no url or x_token may contain a comma."
+  }
+}
+
 variable "rpc_url" {
   description = "Solana JSON-RPC endpoint. Required in RPC mode; enables Yellowstone gap recovery when set and is used by backfill."
   type        = string

@@ -8,7 +8,9 @@ RPC plan, or your own node running the
 [`yellowstone-grpc`](https://github.com/rpcpool/yellowstone-grpc) plugin.
 Microscope speaks the upstream protocol only, so any of them work.
 `GEYSER_X_TOKEN` is the `x-token` header; leave it empty for providers that
-authenticate by URL.
+authenticate by URL. `GEYSER_FALLBACK_URLS` and `GEYSER_FALLBACK_X_TOKENS` add
+endpoints from other providers that the stream fails over to when the current
+one stops answering; see the README's datasource section.
 
 **Solana JSON-RPC (`RPC_URL`)**: required by `just backfill`, adds gap recovery
 alongside Yellowstone, and is the datasource in `mode = "rpc"`. It must serve

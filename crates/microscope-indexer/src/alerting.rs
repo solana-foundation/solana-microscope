@@ -364,13 +364,13 @@ fn yellowstone_health_rules(channels: &BTreeSet<AlertChannel>, pending_seconds: 
                 prometheus_health_rule(
                     &format!("ms-yellowstone-gap-{channel}"),
                     &format!("Yellowstone gap unrecovered [{channel}]"),
-                    &format!("max(increase(microscope_yellowstone_disconnects_total[{YELLOWSTONE_GAP_WINDOW_SECONDS}s]) and on() microscope_rpc_recovery_enabled == 0)"),
+                    &format!("(sum(increase(microscope_yellowstone_disconnects_total[{YELLOWSTONE_GAP_WINDOW_SECONDS}s])) + sum(increase(microscope_yellowstone_failovers_total[{YELLOWSTONE_GAP_WINDOW_SECONDS}s]))) and on() microscope_rpc_recovery_enabled == 0"),
                     "$B > 0",
                     "OK",
                     "error",
                     "yellowstone_gap_unrecovered",
                     channel,
-                    "The Yellowstone stream reconnected at the provider's current head after a disconnect while RPC recovery is not replaying the gap, either because RPC_URL is unset or because recovery disabled itself (see the RPC recovery disabled alert). The transactions in the gap will never be indexed. microscope_yellowstone_missed_slots_total gives the size of the gap; backfill this interval.",
+                    "The Yellowstone stream reconnected at the provider's current head after a disconnect, or switched to another endpoint, while RPC recovery is not replaying the gap, either because RPC_URL is unset or because recovery disabled itself (see the RPC recovery disabled alert). The transactions in the gap will never be indexed. microscope_yellowstone_missed_slots_total gives the size of a reconnect gap; a switch leaves a gap from the old endpoint's last message to the new subscription, which no counter sizes. Backfill this interval.",
                                     pending_seconds,
                 ),
                 prometheus_health_rule(
@@ -382,8 +382,20 @@ fn yellowstone_health_rules(channels: &BTreeSet<AlertChannel>, pending_seconds: 
                     "error",
                     "yellowstone_endpoint_unreachable",
                     channel,
-                    "Every probe of the Yellowstone endpoint failed, so the datasource cannot establish a stream. The disconnect and missed-slot counters stay flat throughout, because they only move once an established stream goes silent, so this is the only metric that shows a provider refusing connections. No data also alerts here: the probe gauge is seeded at startup, so its absence means the indexer is gone.",
+                    "Every probe of every configured Yellowstone endpoint failed, so the datasource cannot establish a stream anywhere. The disconnect and missed-slot counters stay flat throughout, because they only move once an established stream goes silent, so this is the only metric that shows a provider refusing connections. No data also alerts here: the probe gauge is seeded at startup, so its absence means the indexer is gone.",
                                     pending_seconds,
+                ),
+                prometheus_health_rule(
+                    &format!("ms-yellowstone-fallback-{channel}"),
+                    &format!("Yellowstone running on a fallback endpoint [{channel}]"),
+                    "max(microscope_yellowstone_active_endpoint{role=\"fallback\"}) or on() vector(0)",
+                    "$B > 0",
+                    "OK",
+                    "warning",
+                    "yellowstone_fallback_active",
+                    channel,
+                    "The primary Yellowstone endpoint failed its probe for a minute, so the stream moved to a fallback from GEYSER_FALLBACK_URLS. Indexing continues; the switch left a gap that RPC recovery replays when RPC_URL is configured. The microscope_yellowstone_active_endpoint series at 1 names the endpoint in use, and the stream returns to the primary once its probe has been healthy for five minutes. Check the primary provider's status.",
+                    pending_seconds,
                 ),
             ]
         })
@@ -1064,7 +1076,7 @@ mod tests {
         assert_eq!(gap["data"][0]["datasourceUid"], "prometheus");
         assert_eq!(
             gap["data"][0]["model"]["expr"],
-            "max(increase(microscope_yellowstone_disconnects_total[600s]) and on() microscope_rpc_recovery_enabled == 0)"
+            "(sum(increase(microscope_yellowstone_disconnects_total[600s])) + sum(increase(microscope_yellowstone_failovers_total[600s]))) and on() microscope_rpc_recovery_enabled == 0"
         );
         assert_eq!(gap["data"][2]["model"]["expression"], "$B > 0");
         assert_eq!(gap["noDataState"], "OK");
@@ -1118,6 +1130,29 @@ mod tests {
         assert!(health_rule(&document, "ms-yellowstone-gap-slack").is_none());
         assert!(health_rule(&document, "ms-yellowstone-stream-slack").is_none());
         assert!(health_rule(&document, "ms-yellowstone-unreachable-slack").is_none());
+        assert!(health_rule(&document, "ms-yellowstone-fallback-slack").is_none());
+    }
+
+    /// The primary is the provider the deployment chose and pays for, so
+    /// streaming from a fallback is worth a warning even while nothing is lost.
+    /// Without fallbacks the role series never exists, which must read as
+    /// healthy rather than as missing data.
+    #[test]
+    fn warns_while_the_stream_runs_on_a_fallback_endpoint() {
+        let config = config(vec![]);
+        let channels = BTreeSet::from([AlertChannel::Slack]);
+
+        let document = provisioning_document(&config, &channels, false).unwrap();
+        let rule = health_rule(&document, "ms-yellowstone-fallback-slack").unwrap();
+
+        assert_eq!(
+            rule["data"][0]["model"]["expr"],
+            "max(microscope_yellowstone_active_endpoint{role=\"fallback\"}) or on() vector(0)"
+        );
+        assert_eq!(rule["data"][2]["model"]["expression"], "$B > 0");
+        assert_eq!(rule["noDataState"], "OK");
+        assert_eq!(rule["labels"]["severity"], "warning");
+        assert_eq!(rule["labels"]["signal_name"], "yellowstone_fallback_active");
     }
 
     /// The disconnect counter only moves once an established stream goes

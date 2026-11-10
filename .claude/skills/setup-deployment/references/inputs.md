@@ -14,6 +14,7 @@ Validate each answer as it arrives using the same rules Terraform enforces at pl
 | datasource | `yellowstone` (default) or `rpc` |
 | `geyser_url` | required in Yellowstone mode; `http(s)://` URL |
 | `geyser_x_token` | optional in Yellowstone mode; empty is fine |
+| `geyser_fallbacks` | optional list of `{ url, x_token }` from other providers, in priority order; recommended, since one provider outage otherwise stops indexing. No commas in either field |
 | `rpc_url` | required in RPC mode and by the backfill command; optional in Yellowstone mode, where setting it enables disconnect and restart recovery and is recommended |
 | `poll_interval_seconds` | RPC polling or reconciliation interval; 1-300 seconds, default 5 |
 | `replay_window_slots` | crash-safety overlap replayed on first start and restart; 1-100,000 slots, default 600 |

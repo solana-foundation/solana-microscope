@@ -80,40 +80,67 @@ pub fn record_event() {
 
 /// Seeds the counters at zero so the first disconnect registers as an increase
 /// rather than as a series appearing, which `increase()` cannot see.
-pub fn initialize_yellowstone() {
-    record_yellowstone_disconnects(0, 0);
+pub fn initialize_yellowstone(endpoint: &str) {
+    record_yellowstone_disconnects(endpoint, 0, 0);
 }
 
 /// Counts an established stream going silent, which is narrower than the stream
 /// being unusable: a subscribe that never succeeds notifies nothing, so a flat
 /// counter is not evidence the datasource was connected.
 /// `microscope_yellowstone_probe_healthy` covers that case.
-pub fn record_yellowstone_disconnect(missed_slots: u64) {
-    record_yellowstone_disconnects(1, missed_slots);
+pub fn record_yellowstone_disconnect(endpoint: &str, missed_slots: u64) {
+    record_yellowstone_disconnects(endpoint, 1, missed_slots);
 }
 
-fn record_yellowstone_disconnects(disconnects: u64, missed_slots: u64) {
-    metrics::counter!("microscope_yellowstone_disconnects_total").increment(disconnects);
-    metrics::counter!("microscope_yellowstone_missed_slots_total").increment(missed_slots);
+fn record_yellowstone_disconnects(endpoint: &str, disconnects: u64, missed_slots: u64) {
+    metrics::counter!("microscope_yellowstone_disconnects_total", "endpoint" => endpoint.to_string())
+        .increment(disconnects);
+    metrics::counter!("microscope_yellowstone_missed_slots_total", "endpoint" => endpoint.to_string())
+        .increment(missed_slots);
 }
 
 /// Seeds the same way readiness seeds its window: healthy until a probe says
 /// otherwise, so the first attempt is not read as a failure.
-pub fn initialize_yellowstone_probe() {
-    metrics::counter!("microscope_yellowstone_probe_failures_total").increment(0);
-    set_yellowstone_probe_healthy(true);
+pub fn initialize_yellowstone_probe(endpoint: &str) {
+    metrics::counter!("microscope_yellowstone_probe_failures_total", "endpoint" => endpoint.to_string())
+        .increment(0);
+    set_yellowstone_probe_healthy(endpoint, true);
 }
 
-pub fn record_yellowstone_probe_failure() {
-    metrics::counter!("microscope_yellowstone_probe_failures_total").increment(1);
-    set_yellowstone_probe_healthy(false);
+pub fn record_yellowstone_probe_failure(endpoint: &str) {
+    metrics::counter!("microscope_yellowstone_probe_failures_total", "endpoint" => endpoint.to_string())
+        .increment(1);
+    set_yellowstone_probe_healthy(endpoint, false);
 }
 
 /// A rejected token or an unreachable endpoint leaves the process healthy and
 /// consuming nothing, so the endpoint's own reachability has to be a state an
 /// alert can read rather than an event in the logs.
-pub fn set_yellowstone_probe_healthy(healthy: bool) {
-    metrics::gauge!("microscope_yellowstone_probe_healthy").set(if healthy { 1.0 } else { 0.0 });
+pub fn set_yellowstone_probe_healthy(endpoint: &str, healthy: bool) {
+    metrics::gauge!("microscope_yellowstone_probe_healthy", "endpoint" => endpoint.to_string())
+        .set(if healthy { 1.0 } else { 0.0 });
+}
+
+/// A switch resubscribes at the new endpoint's live head, so it leaves a gap
+/// the disconnect counter never sees.
+pub fn initialize_yellowstone_failovers() {
+    metrics::counter!("microscope_yellowstone_failovers_total").increment(0);
+}
+
+pub fn record_yellowstone_failover() {
+    metrics::counter!("microscope_yellowstone_failovers_total").increment(1);
+}
+
+pub fn set_yellowstone_active_endpoint(endpoints: &[String], active: usize) {
+    for (index, endpoint) in endpoints.iter().enumerate() {
+        let role = if index == 0 { "primary" } else { "fallback" };
+        metrics::gauge!(
+            "microscope_yellowstone_active_endpoint",
+            "endpoint" => endpoint.clone(),
+            "role" => role
+        )
+        .set(if index == active { 1.0 } else { 0.0 });
+    }
 }
 
 /// Seeds every counter the polling panels chart. Unseeded, a metric that never

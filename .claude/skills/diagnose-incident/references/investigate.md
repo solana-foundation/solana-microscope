@@ -49,7 +49,8 @@ Read `crates/microscope-indexer/src/telemetry.rs` for the authoritative list. Th
 
 | Question | Metric |
 |----------|--------|
-| Is the provider answering at all | `microscope_yellowstone_probe_healthy`, `microscope_yellowstone_probe_failures_total` |
+| Is the provider answering at all | `microscope_yellowstone_probe_healthy`, `microscope_yellowstone_probe_failures_total` (one series per `endpoint`) |
+| Which endpoint is streaming, and did it switch | `microscope_yellowstone_active_endpoint` (1 on the endpoint in use), `microscope_yellowstone_failovers_total` |
 | Did an established stream drop, and how much did it miss | `microscope_yellowstone_disconnects_total`, `microscope_yellowstone_missed_slots_total` |
 | Is gap recovery on, and why not | `microscope_rpc_recovery_enabled`, `microscope_rpc_recovery_degraded` (the `reason` label) |
 | Is the poller working | `microscope_rpc_poll_last_success_unixtime`, `microscope_rpc_poll_failures_total`, `microscope_rpc_poll_lag_slots`, `microscope_rpc_poll_head_slot` |

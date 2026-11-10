@@ -52,6 +52,8 @@ metadata:
 stringData:
   GEYSER_URL: https://your-yellowstone-endpoint:443
   GEYSER_X_TOKEN: ""
+  GEYSER_FALLBACK_URLS: ""
+  GEYSER_FALLBACK_X_TOKENS: ""
   RPC_URL: https://your-solana-rpc-endpoint
 ```
 

@@ -1,4 +1,8 @@
-use std::{collections::HashMap, env, time::Duration};
+use std::{
+    collections::HashMap,
+    env,
+    time::{Duration, Instant},
+};
 
 use async_trait::async_trait;
 use carbon_core::{
@@ -39,23 +43,114 @@ const RECONNECT_MAX_RETRIES: u32 = 5;
 /// the reconnect budget rather than cut it short.
 const STREAM_TIMEOUT: Duration = Duration::from_secs(120);
 
-pub fn yellowstone(
-    program_id: &str,
-    multisig_state_address: Option<Pubkey>,
-) -> YellowstoneGrpcGeyserClient {
-    let geyser_url = env::var("GEYSER_URL").unwrap_or_default();
-    if geyser_url.is_empty() {
-        panic!("GEYSER_URL env var must be set to a Yellowstone gRPC endpoint");
-    }
+/// How long the active endpoint may fail its probe before the stream moves to
+/// the next healthy one.
+const FAILOVER_AFTER: Duration = Duration::from_secs(60);
+/// How long a higher-priority endpoint must stay healthy before the stream
+/// moves back to it.
+const FAILBACK_AFTER: Duration = Duration::from_secs(300);
 
-    // docker-compose passes the var through even when unset, so an empty string means "no token".
-    let x_token = env::var("GEYSER_X_TOKEN").ok().filter(|t| !t.is_empty());
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Endpoint {
+    url: String,
+    x_token: Option<String>,
+    label: String,
+}
+
+pub fn yellowstone(program_id: &str, multisig_state_address: Option<Pubkey>) -> FailoverDatasource {
+    let endpoints = endpoints(
+        &env::var("GEYSER_URL").unwrap_or_default(),
+        env::var("GEYSER_X_TOKEN").ok().as_deref(),
+        env::var("GEYSER_FALLBACK_URLS").ok().as_deref(),
+        env::var("GEYSER_FALLBACK_X_TOKENS").ok().as_deref(),
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
+    log::info!(
+        "Yellowstone endpoints in priority order: {}",
+        endpoints
+            .iter()
+            .map(|endpoint| endpoint.label.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
 
     health::expect_stream_probe(probe_grace_seconds());
-    telemetry::initialize_yellowstone_probe();
-    tokio::spawn(probe_endpoint(geyser_url.clone(), x_token.clone()));
+    telemetry::initialize_yellowstone_failovers();
+    for endpoint in &endpoints {
+        telemetry::initialize_yellowstone_probe(&endpoint.label);
+    }
+    let clients = endpoints
+        .iter()
+        .map(|endpoint| client(endpoint, program_id, multisig_state_address))
+        .collect();
+    let datasource = FailoverDatasource { endpoints, clients };
+    telemetry::set_yellowstone_active_endpoint(&datasource.labels(), 0);
+    datasource
+}
 
-    client(geyser_url, x_token, program_id, multisig_state_address)
+/// docker-compose passes every variable through even when unset, so an empty
+/// value means "not configured", for the lists as for the single token.
+fn endpoints(
+    url: &str,
+    x_token: Option<&str>,
+    fallback_urls: Option<&str>,
+    fallback_x_tokens: Option<&str>,
+) -> Result<Vec<Endpoint>, String> {
+    if url.is_empty() {
+        return Err("GEYSER_URL env var must be set to a Yellowstone gRPC endpoint".to_string());
+    }
+    let fallback_urls = fallback_urls
+        .filter(|urls| !urls.trim().is_empty())
+        .map(|urls| urls.split(',').map(str::trim).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let fallback_x_tokens = match fallback_x_tokens.filter(|tokens| !tokens.is_empty()) {
+        None => vec![""; fallback_urls.len()],
+        Some(tokens) => tokens.split(',').map(str::trim).collect(),
+    };
+    if fallback_x_tokens.len() != fallback_urls.len() {
+        return Err(format!(
+            "GEYSER_FALLBACK_X_TOKENS lists {} token(s) for {} GEYSER_FALLBACK_URLS entries; give one per URL, leaving an entry empty for an endpoint without a token",
+            fallback_x_tokens.len(),
+            fallback_urls.len()
+        ));
+    }
+
+    let mut endpoints = Vec::with_capacity(1 + fallback_urls.len());
+    for (url, x_token) in std::iter::once((url, x_token.unwrap_or_default()))
+        .chain(fallback_urls.into_iter().zip(fallback_x_tokens))
+    {
+        let label = endpoint_label(url)?;
+        if endpoints
+            .iter()
+            .any(|endpoint: &Endpoint| endpoint.label == label)
+        {
+            return Err(format!(
+                "Yellowstone endpoint {label} is listed twice; each endpoint needs its own host"
+            ));
+        }
+        endpoints.push(Endpoint {
+            url: url.to_string(),
+            x_token: Some(x_token.to_string()).filter(|token| !token.is_empty()),
+            label,
+        });
+    }
+    Ok(endpoints)
+}
+
+/// The host and port only: providers put API keys in the path and query, and
+/// the label ends up in metrics and alerts.
+fn endpoint_label(url: &str) -> Result<String, String> {
+    let parsed = reqwest::Url::parse(url)
+        .ok()
+        .filter(|parsed| matches!(parsed.scheme(), "http" | "https"))
+        .ok_or_else(|| "every Yellowstone endpoint must be an HTTP(S) URL".to_string())?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "every Yellowstone endpoint must name a host".to_string())?;
+    Ok(match parsed.port() {
+        Some(port) => format!("{host}:{port}"),
+        None => host.to_string(),
+    })
 }
 
 /// How long the endpoint may fail the probe continuously before `/readyz`
@@ -74,25 +169,153 @@ fn probe_grace_seconds() -> u64 {
     })
 }
 
-/// Stream silence proves nothing (it only carries the monitored program), so
-/// probe with `GetVersion`: the cheapest Geyser call, behind the same
-/// `x-token` interceptor as `Subscribe`, so a bad token fails identically.
-async fn probe_endpoint(geyser_url: String, x_token: Option<String>) {
-    loop {
-        match probe_get_version(&geyser_url, x_token.clone()).await {
-            Ok(()) => {
-                health::record_stream_probe_success();
-                telemetry::set_yellowstone_probe_healthy(true);
-            }
+/// Streams from one endpoint at a time. Carbon retries a dead endpoint forever
+/// and never returns, so leaving one is decided here, from the probes.
+pub struct FailoverDatasource {
+    endpoints: Vec<Endpoint>,
+    clients: Vec<YellowstoneGrpcGeyserClient>,
+}
+
+impl FailoverDatasource {
+    fn labels(&self) -> Vec<String> {
+        self.endpoints
+            .iter()
+            .map(|endpoint| endpoint.label.clone())
+            .collect()
+    }
+
+    /// Carbon's `consume` dials, spawns the stream and returns, so the token
+    /// is the only handle on a running stream.
+    async fn open(
+        &self,
+        index: usize,
+        id: &DatasourceId,
+        sender: &mpsc::Sender<(Update, DatasourceId)>,
+        cancellation_token: &CancellationToken,
+    ) -> Option<CancellationToken> {
+        let stream = cancellation_token.child_token();
+        match self.clients[index]
+            .consume(id.clone(), sender.clone(), stream.clone())
+            .await
+        {
+            Ok(()) => Some(stream),
             Err(error) => {
-                log::warn!("the Yellowstone endpoint failed its readiness probe: {error}");
-                telemetry::record_yellowstone_probe_failure();
+                log::error!(
+                    "failed to open the Yellowstone stream to {}: {error}",
+                    self.endpoints[index].label
+                );
+                None
             }
         }
-        tokio::time::sleep(PROBE_INTERVAL).await;
+    }
+
+    async fn probe_all(&self, health: &mut [ProbeHealth]) {
+        let results = futures::future::join_all(
+            self.endpoints
+                .iter()
+                .map(|endpoint| probe_get_version(&endpoint.url, endpoint.x_token.clone())),
+        )
+        .await;
+        let now = Instant::now();
+        for ((endpoint, state), result) in self.endpoints.iter().zip(health).zip(results) {
+            state.record(result.is_ok(), now);
+            match result {
+                Ok(()) => {
+                    health::record_stream_probe_success();
+                    telemetry::set_yellowstone_probe_healthy(&endpoint.label, true);
+                }
+                Err(error) => {
+                    log::warn!(
+                        "the Yellowstone endpoint {} failed its readiness probe: {error}",
+                        endpoint.label
+                    );
+                    telemetry::record_yellowstone_probe_failure(&endpoint.label);
+                }
+            }
+        }
     }
 }
 
+#[async_trait]
+impl Datasource for FailoverDatasource {
+    async fn consume(
+        &self,
+        id: DatasourceId,
+        sender: mpsc::Sender<(Update, DatasourceId)>,
+        cancellation_token: CancellationToken,
+    ) -> CarbonResult<()> {
+        let mut health = vec![ProbeHealth::default(); self.endpoints.len()];
+        let mut active = 0;
+        let mut stream = self.open(active, &id, &sender, &cancellation_token).await;
+        let mut probes = tokio::time::interval(PROBE_INTERVAL);
+        probes.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                _ = cancellation_token.cancelled() => return Ok(()),
+                _ = probes.tick() => {}
+            }
+            tokio::select! {
+                _ = cancellation_token.cancelled() => return Ok(()),
+                _ = self.probe_all(&mut health) => {}
+            }
+            if let Some(next) = next_endpoint(active, &health, Instant::now()) {
+                log::warn!(
+                    "switching the Yellowstone stream from {} to {}",
+                    self.endpoints[active].label,
+                    self.endpoints[next].label
+                );
+                if let Some(stream) = stream.take() {
+                    stream.cancel();
+                }
+                active = next;
+                telemetry::record_yellowstone_failover();
+                telemetry::set_yellowstone_active_endpoint(&self.labels(), active);
+            }
+            if stream.is_none() {
+                stream = self.open(active, &id, &sender, &cancellation_token).await;
+            }
+        }
+    }
+
+    fn update_types(&self) -> Vec<UpdateType> {
+        self.clients[0].update_types()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct ProbeHealth {
+    failing_since: Option<Instant>,
+    healthy_since: Option<Instant>,
+}
+
+impl ProbeHealth {
+    fn record(&mut self, healthy: bool, now: Instant) {
+        if healthy {
+            self.failing_since = None;
+            self.healthy_since.get_or_insert(now);
+        } else {
+            self.healthy_since = None;
+            self.failing_since.get_or_insert(now);
+        }
+    }
+}
+
+/// Leaves a failing endpoint for the first healthy one in priority order, and
+/// otherwise returns to a higher-priority endpoint once it has stayed healthy.
+fn next_endpoint(active: usize, health: &[ProbeHealth], now: Instant) -> Option<usize> {
+    let lasted = |since: Option<Instant>, period: Duration| {
+        since.is_some_and(|since| now.duration_since(since) >= period)
+    };
+    if lasted(health[active].failing_since, FAILOVER_AFTER) {
+        return (0..health.len())
+            .find(|&index| index != active && health[index].healthy_since.is_some());
+    }
+    (0..active).find(|&index| lasted(health[index].healthy_since, FAILBACK_AFTER))
+}
+
+/// Stream silence proves nothing (it only carries the monitored program), so
+/// probe with `GetVersion`: the cheapest Geyser call, behind the same
+/// `x-token` interceptor as `Subscribe`, so a bad token fails identically.
 /// Dials from scratch each probe, covering DNS, TLS and the token the way a
 /// fresh subscription would.
 async fn probe_get_version(geyser_url: &str, x_token: Option<String>) -> Result<(), String> {
@@ -109,21 +332,20 @@ async fn probe_get_version(geyser_url: &str, x_token: Option<String>) -> Result<
 }
 
 fn client(
-    geyser_url: String,
-    x_token: Option<String>,
+    endpoint: &Endpoint,
     program_id: &str,
     multisig_state_address: Option<Pubkey>,
 ) -> YellowstoneGrpcGeyserClient {
     let (disconnections, notifications) = mpsc::channel(DISCONNECT_NOTIFICATION_BUFFER);
-    telemetry::initialize_yellowstone();
-    tokio::spawn(record_disconnections(
-        notifications,
-        telemetry::record_yellowstone_disconnect,
-    ));
+    telemetry::initialize_yellowstone(&endpoint.label);
+    let label = endpoint.label.clone();
+    tokio::spawn(record_disconnections(notifications, move |missed_slots| {
+        telemetry::record_yellowstone_disconnect(&label, missed_slots)
+    }));
 
     YellowstoneGrpcGeyserClient::new(
-        geyser_url,
-        x_token,
+        endpoint.url.clone(),
+        endpoint.x_token.clone(),
         Some(CommitmentLevel::Confirmed),
         HashMap::new(),
         transaction_filters(program_id, multisig_state_address),
@@ -258,11 +480,13 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::{
-        client, reconnect, record_disconnections, transaction_filters, RecordingDatasource,
-        DEFAULT_CHANNEL_BUFFER_SIZE, STREAM_TIMEOUT,
+        client, endpoints, next_endpoint, reconnect, record_disconnections, transaction_filters,
+        Endpoint, ProbeHealth, RecordingDatasource, DEFAULT_CHANNEL_BUFFER_SIZE, FAILBACK_AFTER,
+        FAILOVER_AFTER, STREAM_TIMEOUT,
     };
     use crate::{delivered::DeliveredSignatures, test_support::signature};
     use std::time::Duration;
+    use std::time::Instant;
     use yellowstone_grpc_client::ReconnectionPolicy;
 
     fn transaction_update(signature: Signature, slot: u64) -> Update {
@@ -343,14 +567,14 @@ mod tests {
 
     #[tokio::test]
     async fn subscribes_with_a_notifier_so_gaps_are_not_silent() {
-        let client = client("http://localhost:10000".to_string(), None, "program", None);
+        let client = client(&endpoint("http://localhost:10000"), "program", None);
 
         assert!(client.disconnect_notifier.is_some());
     }
 
     #[tokio::test]
     async fn recovers_a_disconnect_by_replaying_it_rather_than_resuming_at_the_head() {
-        let client = client("http://localhost:10000".to_string(), None, "program", None);
+        let client = client(&endpoint("http://localhost:10000"), "program", None);
 
         let configured = client
             .geyser_config
@@ -486,6 +710,187 @@ mod tests {
             .unwrap();
 
         assert!(delivered.drain().await.is_empty());
+    }
+
+    fn endpoint(url: &str) -> Endpoint {
+        endpoints(url, None, None, None).unwrap().remove(0)
+    }
+
+    #[test]
+    fn streams_from_the_main_endpoint_alone_without_fallbacks() {
+        let configured = endpoints(
+            "https://grpc.main.example:443",
+            Some("main"),
+            Some(""),
+            Some(""),
+        )
+        .unwrap();
+
+        assert_eq!(
+            configured,
+            [Endpoint {
+                url: "https://grpc.main.example:443".to_string(),
+                x_token: Some("main".to_string()),
+                label: "grpc.main.example".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn pairs_each_fallback_with_its_token_by_position() {
+        let configured = endpoints(
+            "https://grpc.main.example",
+            None,
+            Some("https://grpc.second.example, https://grpc.third.example:10000"),
+            Some(",third"),
+        )
+        .unwrap();
+
+        let pairs = configured
+            .iter()
+            .map(|endpoint| (endpoint.label.as_str(), endpoint.x_token.as_deref()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            pairs,
+            [
+                ("grpc.main.example", None),
+                ("grpc.second.example", None),
+                ("grpc.third.example:10000", Some("third")),
+            ]
+        );
+    }
+
+    /// A token list off by one would pair every later fallback with the wrong
+    /// provider's token, which only shows when the failover is needed.
+    #[test]
+    fn rejects_a_token_list_that_does_not_match_the_fallbacks() {
+        let error = endpoints(
+            "https://grpc.main.example",
+            None,
+            Some("https://grpc.second.example,https://grpc.third.example"),
+            Some("second"),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("1 token(s) for 2"), "{error}");
+    }
+
+    #[test]
+    fn labels_endpoints_without_the_keys_in_their_path_or_query() {
+        let configured = endpoints(
+            "https://mainnet.example.com/secret-key?api-key=secret",
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(configured[0].label, "mainnet.example.com");
+    }
+
+    #[test]
+    fn rejects_a_missing_main_endpoint_a_duplicate_and_a_non_http_fallback() {
+        assert!(endpoints("", None, None, None).is_err());
+        assert!(endpoints(
+            "https://grpc.main.example",
+            None,
+            Some("https://grpc.main.example/other"),
+            None
+        )
+        .is_err());
+        assert!(endpoints(
+            "https://grpc.main.example",
+            None,
+            Some("grpc.second.example"),
+            None
+        )
+        .is_err());
+    }
+
+    fn healthy_since(now: Instant, ago: Duration) -> ProbeHealth {
+        ProbeHealth {
+            failing_since: None,
+            healthy_since: Some(now - ago),
+        }
+    }
+
+    fn failing_since(now: Instant, ago: Duration) -> ProbeHealth {
+        ProbeHealth {
+            failing_since: Some(now - ago),
+            healthy_since: None,
+        }
+    }
+
+    #[test]
+    fn stays_on_an_endpoint_that_failed_for_less_than_the_failover_period() {
+        let now = Instant::now();
+        let health = [
+            failing_since(now, FAILOVER_AFTER - Duration::from_secs(1)),
+            healthy_since(now, Duration::from_secs(600)),
+        ];
+
+        assert_eq!(next_endpoint(0, &health, now), None);
+    }
+
+    #[test]
+    fn fails_over_to_the_first_healthy_endpoint_in_priority_order() {
+        let now = Instant::now();
+        let health = [
+            failing_since(now, FAILOVER_AFTER),
+            failing_since(now, Duration::from_secs(30)),
+            healthy_since(now, Duration::from_secs(15)),
+            healthy_since(now, Duration::from_secs(600)),
+        ];
+
+        assert_eq!(next_endpoint(0, &health, now), Some(2));
+    }
+
+    /// Switching to an endpoint that is also failing only adds a resubscribe at
+    /// the head; staying keeps the replay the stream can still do on recovery.
+    #[test]
+    fn stays_on_a_failing_endpoint_when_no_other_is_healthy() {
+        let now = Instant::now();
+        let health = [
+            failing_since(now, FAILOVER_AFTER * 10),
+            failing_since(now, FAILOVER_AFTER * 10),
+            ProbeHealth::default(),
+        ];
+
+        assert_eq!(next_endpoint(0, &health, now), None);
+    }
+
+    #[test]
+    fn returns_to_a_higher_priority_endpoint_only_after_it_stays_healthy() {
+        let now = Instant::now();
+        let recovering = [
+            healthy_since(now, FAILBACK_AFTER - Duration::from_secs(1)),
+            healthy_since(now, Duration::from_secs(600)),
+        ];
+        let recovered = [
+            healthy_since(now, FAILBACK_AFTER),
+            healthy_since(now, Duration::from_secs(600)),
+        ];
+
+        assert_eq!(next_endpoint(1, &recovering, now), None);
+        assert_eq!(next_endpoint(1, &recovered, now), Some(0));
+        assert_eq!(next_endpoint(0, &recovered, now), None);
+    }
+
+    #[test]
+    fn a_single_failure_resets_the_healthy_period_and_a_success_the_failing_one() {
+        let start = Instant::now();
+        let mut health = ProbeHealth::default();
+
+        health.record(true, start);
+        health.record(false, start + Duration::from_secs(15));
+        health.record(false, start + Duration::from_secs(30));
+
+        assert_eq!(health.healthy_since, None);
+        assert_eq!(health.failing_since, Some(start + Duration::from_secs(15)));
+
+        health.record(true, start + Duration::from_secs(45));
+        assert_eq!(health.failing_since, None);
+        assert_eq!(health.healthy_since, Some(start + Duration::from_secs(45)));
     }
 
     #[test]

@@ -159,6 +159,8 @@ resource "google_secret_manager_secret_version" "runtime" {
   secret_data = jsonencode({
     geyser_url                 = var.geyser_url
     geyser_x_token             = var.geyser_x_token
+    geyser_fallback_urls       = join(",", [for fallback in var.geyser_fallbacks : fallback.url])
+    geyser_fallback_x_tokens   = join(",", [for fallback in var.geyser_fallbacks : fallback.x_token])
     rpc_url                    = var.rpc_url
     grafana_admin_password     = var.grafana_admin_password
     slack_webhook_url          = var.slack_webhook_url
