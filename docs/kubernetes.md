@@ -55,6 +55,7 @@ stringData:
   GEYSER_FALLBACK_URLS: ""
   GEYSER_FALLBACK_X_TOKENS: ""
   RPC_URL: https://your-solana-rpc-endpoint
+  RPC_FALLBACK_URLS: ""
 ```
 
 `idl_path` resolves relative to the config file, so `idl/<YOUR_IDL>.json` finds

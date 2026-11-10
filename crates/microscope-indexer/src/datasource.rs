@@ -21,7 +21,7 @@ use yellowstone_grpc_client::{
 };
 use yellowstone_grpc_proto::geyser::{CommitmentLevel, SubscribeRequestFilterTransactions};
 
-use crate::{delivered::DeliveredSignatures, health, telemetry};
+use crate::{delivered::DeliveredSignatures, failover, health, telemetry};
 
 /// The datasource notifies with `try_send` and discards on a full channel.
 const DISCONNECT_NOTIFICATION_BUFFER: usize = 16;
@@ -42,13 +42,6 @@ const RECONNECT_MAX_RETRIES: u32 = 5;
 /// the live head, which throws the replay checkpoint away, so it has to outlast
 /// the reconnect budget rather than cut it short.
 const STREAM_TIMEOUT: Duration = Duration::from_secs(120);
-
-/// How long the active endpoint may fail its probe before the stream moves to
-/// the next healthy one.
-const FAILOVER_AFTER: Duration = Duration::from_secs(60);
-/// How long a higher-priority endpoint must stay healthy before the stream
-/// moves back to it.
-const FAILBACK_AFTER: Duration = Duration::from_secs(300);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Endpoint {
@@ -119,7 +112,9 @@ fn endpoints(
     for (url, x_token) in std::iter::once((url, x_token.unwrap_or_default()))
         .chain(fallback_urls.into_iter().zip(fallback_x_tokens))
     {
-        let label = endpoint_label(url)?;
+        let label = failover::endpoint_label(url).ok_or_else(|| {
+            format!("every Yellowstone endpoint must be an HTTP(S) URL naming a host, not {url:?}")
+        })?;
         if endpoints
             .iter()
             .any(|endpoint: &Endpoint| endpoint.label == label)
@@ -135,22 +130,6 @@ fn endpoints(
         });
     }
     Ok(endpoints)
-}
-
-/// The host and port only: providers put API keys in the path and query, and
-/// the label ends up in metrics and alerts.
-fn endpoint_label(url: &str) -> Result<String, String> {
-    let parsed = reqwest::Url::parse(url)
-        .ok()
-        .filter(|parsed| matches!(parsed.scheme(), "http" | "https"))
-        .ok_or_else(|| "every Yellowstone endpoint must be an HTTP(S) URL".to_string())?;
-    let host = parsed
-        .host_str()
-        .ok_or_else(|| "every Yellowstone endpoint must name a host".to_string())?;
-    Ok(match parsed.port() {
-        Some(port) => format!("{host}:{port}"),
-        None => host.to_string(),
-    })
 }
 
 /// How long the endpoint may fail the probe continuously before `/readyz`
@@ -209,7 +188,7 @@ impl FailoverDatasource {
         }
     }
 
-    async fn probe_all(&self, health: &mut [ProbeHealth]) {
+    async fn probe_all(&self, health: &mut [failover::ProbeHealth]) {
         let results = futures::future::join_all(
             self.endpoints
                 .iter()
@@ -244,7 +223,7 @@ impl Datasource for FailoverDatasource {
         sender: mpsc::Sender<(Update, DatasourceId)>,
         cancellation_token: CancellationToken,
     ) -> CarbonResult<()> {
-        let mut health = vec![ProbeHealth::default(); self.endpoints.len()];
+        let mut health = vec![failover::ProbeHealth::default(); self.endpoints.len()];
         let mut active = 0;
         let mut stream = self.open(active, &id, &sender, &cancellation_token).await;
         let mut probes = tokio::time::interval(PROBE_INTERVAL);
@@ -258,7 +237,7 @@ impl Datasource for FailoverDatasource {
                 _ = cancellation_token.cancelled() => return Ok(()),
                 _ = self.probe_all(&mut health) => {}
             }
-            if let Some(next) = next_endpoint(active, &health, Instant::now()) {
+            if let Some(next) = failover::next_endpoint(active, &health, Instant::now()) {
                 log::warn!(
                     "switching the Yellowstone stream from {} to {}",
                     self.endpoints[active].label,
@@ -280,37 +259,6 @@ impl Datasource for FailoverDatasource {
     fn update_types(&self) -> Vec<UpdateType> {
         self.clients[0].update_types()
     }
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-struct ProbeHealth {
-    failing_since: Option<Instant>,
-    healthy_since: Option<Instant>,
-}
-
-impl ProbeHealth {
-    fn record(&mut self, healthy: bool, now: Instant) {
-        if healthy {
-            self.failing_since = None;
-            self.healthy_since.get_or_insert(now);
-        } else {
-            self.healthy_since = None;
-            self.failing_since.get_or_insert(now);
-        }
-    }
-}
-
-/// Leaves a failing endpoint for the first healthy one in priority order, and
-/// otherwise returns to a higher-priority endpoint once it has stayed healthy.
-fn next_endpoint(active: usize, health: &[ProbeHealth], now: Instant) -> Option<usize> {
-    let lasted = |since: Option<Instant>, period: Duration| {
-        since.is_some_and(|since| now.duration_since(since) >= period)
-    };
-    if lasted(health[active].failing_since, FAILOVER_AFTER) {
-        return (0..health.len())
-            .find(|&index| index != active && health[index].healthy_since.is_some());
-    }
-    (0..active).find(|&index| lasted(health[index].healthy_since, FAILBACK_AFTER))
 }
 
 /// Stream silence proves nothing (it only carries the monitored program), so
@@ -480,13 +428,11 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::{
-        client, endpoints, next_endpoint, reconnect, record_disconnections, transaction_filters,
-        Endpoint, ProbeHealth, RecordingDatasource, DEFAULT_CHANNEL_BUFFER_SIZE, FAILBACK_AFTER,
-        FAILOVER_AFTER, STREAM_TIMEOUT,
+        client, endpoints, reconnect, record_disconnections, transaction_filters, Endpoint,
+        RecordingDatasource, DEFAULT_CHANNEL_BUFFER_SIZE, STREAM_TIMEOUT,
     };
     use crate::{delivered::DeliveredSignatures, test_support::signature};
     use std::time::Duration;
-    use std::time::Instant;
     use yellowstone_grpc_client::ReconnectionPolicy;
 
     fn transaction_update(signature: Signature, slot: u64) -> Update {
@@ -776,19 +722,6 @@ mod tests {
     }
 
     #[test]
-    fn labels_endpoints_without_the_keys_in_their_path_or_query() {
-        let configured = endpoints(
-            "https://mainnet.example.com/secret-key?api-key=secret",
-            None,
-            None,
-            None,
-        )
-        .unwrap();
-
-        assert_eq!(configured[0].label, "mainnet.example.com");
-    }
-
-    #[test]
     fn rejects_a_missing_main_endpoint_a_duplicate_and_a_non_http_fallback() {
         assert!(endpoints("", None, None, None).is_err());
         assert!(endpoints(
@@ -805,92 +738,6 @@ mod tests {
             None
         )
         .is_err());
-    }
-
-    fn healthy_since(now: Instant, ago: Duration) -> ProbeHealth {
-        ProbeHealth {
-            failing_since: None,
-            healthy_since: Some(now - ago),
-        }
-    }
-
-    fn failing_since(now: Instant, ago: Duration) -> ProbeHealth {
-        ProbeHealth {
-            failing_since: Some(now - ago),
-            healthy_since: None,
-        }
-    }
-
-    #[test]
-    fn stays_on_an_endpoint_that_failed_for_less_than_the_failover_period() {
-        let now = Instant::now();
-        let health = [
-            failing_since(now, FAILOVER_AFTER - Duration::from_secs(1)),
-            healthy_since(now, Duration::from_secs(600)),
-        ];
-
-        assert_eq!(next_endpoint(0, &health, now), None);
-    }
-
-    #[test]
-    fn fails_over_to_the_first_healthy_endpoint_in_priority_order() {
-        let now = Instant::now();
-        let health = [
-            failing_since(now, FAILOVER_AFTER),
-            failing_since(now, Duration::from_secs(30)),
-            healthy_since(now, Duration::from_secs(15)),
-            healthy_since(now, Duration::from_secs(600)),
-        ];
-
-        assert_eq!(next_endpoint(0, &health, now), Some(2));
-    }
-
-    /// Switching to an endpoint that is also failing only adds a resubscribe at
-    /// the head; staying keeps the replay the stream can still do on recovery.
-    #[test]
-    fn stays_on_a_failing_endpoint_when_no_other_is_healthy() {
-        let now = Instant::now();
-        let health = [
-            failing_since(now, FAILOVER_AFTER * 10),
-            failing_since(now, FAILOVER_AFTER * 10),
-            ProbeHealth::default(),
-        ];
-
-        assert_eq!(next_endpoint(0, &health, now), None);
-    }
-
-    #[test]
-    fn returns_to_a_higher_priority_endpoint_only_after_it_stays_healthy() {
-        let now = Instant::now();
-        let recovering = [
-            healthy_since(now, FAILBACK_AFTER - Duration::from_secs(1)),
-            healthy_since(now, Duration::from_secs(600)),
-        ];
-        let recovered = [
-            healthy_since(now, FAILBACK_AFTER),
-            healthy_since(now, Duration::from_secs(600)),
-        ];
-
-        assert_eq!(next_endpoint(1, &recovering, now), None);
-        assert_eq!(next_endpoint(1, &recovered, now), Some(0));
-        assert_eq!(next_endpoint(0, &recovered, now), None);
-    }
-
-    #[test]
-    fn a_single_failure_resets_the_healthy_period_and_a_success_the_failing_one() {
-        let start = Instant::now();
-        let mut health = ProbeHealth::default();
-
-        health.record(true, start);
-        health.record(false, start + Duration::from_secs(15));
-        health.record(false, start + Duration::from_secs(30));
-
-        assert_eq!(health.healthy_since, None);
-        assert_eq!(health.failing_since, Some(start + Duration::from_secs(15)));
-
-        health.record(true, start + Duration::from_secs(45));
-        assert_eq!(health.failing_since, None);
-        assert_eq!(health.healthy_since, Some(start + Duration::from_secs(45)));
     }
 
     #[test]

@@ -16,6 +16,7 @@ Validate each answer as it arrives using the same rules Terraform enforces at pl
 | `geyser_x_token` | optional in Yellowstone mode; empty is fine |
 | `geyser_fallbacks` | optional list of `{ url, x_token }` from other providers, in priority order; recommended, since one provider outage otherwise stops indexing. No commas in either field |
 | `rpc_url` | required in RPC mode and by the backfill command; optional in Yellowstone mode, where setting it enables disconnect and restart recovery and is recommended |
+| `rpc_fallback_urls` | optional list of JSON-RPC URLs from other providers, in priority order; requires `rpc_url`. No commas |
 | `poll_interval_seconds` | RPC polling or reconciliation interval; 1-300 seconds, default 5 |
 | `replay_window_slots` | crash-safety overlap replayed on first start and restart; 1-100,000 slots, default 600 |
 | `grafana_admin_password` | >= 12 chars; offer to generate one with `openssl rand -base64 18` |

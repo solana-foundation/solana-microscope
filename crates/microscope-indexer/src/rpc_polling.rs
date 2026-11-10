@@ -31,7 +31,7 @@ use self::{
 use crate::{
     backfill::{self, FetchError},
     delivered::DeliveredSignatures,
-    shipped, telemetry,
+    failover, shipped, telemetry,
 };
 
 const CONCURRENT_TRANSACTION_FETCHES: usize = 5;
@@ -40,9 +40,15 @@ const HISTORY_BOUNDARY_CHECK_INTERVAL: Duration = Duration::from_secs(60);
 const STATE_FILE_NAME: &str = "rpc-polling.json";
 const SHIPPED_JOURNAL_FILE_NAME: &str = "shipped.log";
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RpcEndpoint {
+    url: String,
+    label: String,
+}
+
 #[derive(Debug)]
 pub struct RpcPollingDatasource {
-    rpc_url: String,
+    endpoints: Vec<RpcEndpoint>,
     program_id: Pubkey,
     multisig_state_address: Option<Pubkey>,
     poll_interval: Duration,
@@ -59,17 +65,30 @@ impl RpcPollingDatasource {
         replay_window_slots: u64,
         delivered: Option<DeliveredSignatures>,
     ) -> Option<Self> {
-        let rpc_url = env::var("RPC_URL").ok().filter(|url| !url.is_empty())?;
-        if !valid_rpc_url(&rpc_url) {
-            panic!("RPC_URL must be a valid HTTP(S) URL");
-        }
+        let fallback_urls = env::var("RPC_FALLBACK_URLS").ok();
+        let Some(rpc_url) = env::var("RPC_URL").ok().filter(|url| !url.is_empty()) else {
+            if fallback_urls.is_some_and(|urls| !urls.trim().is_empty()) {
+                panic!("RPC_FALLBACK_URLS is set but RPC_URL is not; set RPC_URL to the primary endpoint");
+            }
+            return None;
+        };
+        let endpoints = rpc_endpoints(&rpc_url, fallback_urls.as_deref())
+            .unwrap_or_else(|error| panic!("{error}"));
+        log::info!(
+            "RPC endpoints in priority order: {}",
+            endpoints
+                .iter()
+                .map(|endpoint| endpoint.label.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
         let state_dir = env::var_os("MICROSCOPE_STATE_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(".microscope-state"));
         shipped::install(state_dir.join(SHIPPED_JOURNAL_FILE_NAME));
 
         Some(Self {
-            rpc_url,
+            endpoints,
             program_id,
             multisig_state_address,
             poll_interval,
@@ -415,6 +434,33 @@ struct PollOutcome {
     history_boundary_verified: bool,
 }
 
+/// docker-compose passes the variable through even when unset, so an empty
+/// list means no fallbacks.
+fn rpc_endpoints(url: &str, fallback_urls: Option<&str>) -> Result<Vec<RpcEndpoint>, String> {
+    let fallback_urls = fallback_urls
+        .filter(|urls| !urls.trim().is_empty())
+        .map(|urls| urls.split(',').map(str::trim).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let mut endpoints: Vec<RpcEndpoint> = Vec::with_capacity(1 + fallback_urls.len());
+    for url in std::iter::once(url).chain(fallback_urls) {
+        let label = failover::endpoint_label(url)
+            .filter(|_| valid_rpc_url(url))
+            .ok_or_else(|| {
+                "RPC_URL and every RPC_FALLBACK_URLS entry must be a valid HTTP(S) URL".to_string()
+            })?;
+        if endpoints.iter().any(|endpoint| endpoint.label == label) {
+            return Err(format!(
+                "RPC endpoint {label} is listed twice; each endpoint needs its own host"
+            ));
+        }
+        endpoints.push(RpcEndpoint {
+            url: url.to_string(),
+            label,
+        });
+    }
+    Ok(endpoints)
+}
+
 fn valid_rpc_url(value: &str) -> bool {
     reqwest::Url::parse(value)
         .ok()
@@ -483,9 +529,9 @@ mod tests {
     use solana_commitment_config::CommitmentConfig;
 
     use super::{
-        advance_ready_cursors, cursor_ahead_of_head, process_fetched_transaction, signatures,
-        signatures_to_fetch, valid_rpc_url, AddressCursor, DeliveredSignatures, PollingState,
-        RpcClient, RpcPollingDatasource, TransactionPollOutcome,
+        advance_ready_cursors, cursor_ahead_of_head, process_fetched_transaction, rpc_endpoints,
+        signatures, signatures_to_fetch, valid_rpc_url, AddressCursor, DeliveredSignatures,
+        PollingState, RpcClient, RpcPollingDatasource, TransactionPollOutcome,
     };
     use crate::{
         backfill::FetchError,
@@ -499,6 +545,45 @@ mod tests {
         assert!(valid_rpc_url("http://127.0.0.1:8899"));
         assert!(!valid_rpc_url("rpc.example.com"));
         assert!(!valid_rpc_url("ftp://rpc.example.com"));
+    }
+
+    #[test]
+    fn polls_the_main_endpoint_first_and_the_fallbacks_in_order() {
+        let endpoints = rpc_endpoints(
+            "https://mainnet.helius-rpc.com/?api-key=secret",
+            Some("https://example.quiknode.pro/secret/, https://rpc.example.com:8899"),
+        )
+        .unwrap();
+
+        let labels = endpoints
+            .iter()
+            .map(|endpoint| endpoint.label.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            labels,
+            [
+                "mainnet.helius-rpc.com",
+                "example.quiknode.pro",
+                "rpc.example.com:8899"
+            ]
+        );
+        assert_eq!(endpoints[1].url, "https://example.quiknode.pro/secret/");
+        assert_eq!(
+            rpc_endpoints("https://rpc.example.com", Some(""))
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn rejects_a_non_http_fallback_and_a_repeated_host() {
+        assert!(rpc_endpoints("https://rpc.example.com", Some("rpc.other.com")).is_err());
+        assert!(rpc_endpoints(
+            "https://rpc.example.com/?api-key=a",
+            Some("https://rpc.example.com/?api-key=b")
+        )
+        .is_err());
     }
 
     #[test]
@@ -554,7 +639,7 @@ mod tests {
 
     fn polling_datasource(delivered: Option<DeliveredSignatures>) -> RpcPollingDatasource {
         RpcPollingDatasource {
-            rpc_url: "https://rpc.example.com".to_string(),
+            endpoints: rpc_endpoints("https://rpc.example.com", None).unwrap(),
             program_id: Pubkey::new_unique(),
             multisig_state_address: None,
             poll_interval: Duration::from_secs(5),

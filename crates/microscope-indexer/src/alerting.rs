@@ -514,6 +514,18 @@ fn rpc_health_rules(
                                     pending_seconds,
                 ),
                 prometheus_health_rule(
+                    &format!("ms-rpc-fallback-{channel}"),
+                    &format!("RPC polling on a fallback endpoint [{channel}]"),
+                    "max(microscope_rpc_active_endpoint{role=\"fallback\"}) or on() vector(0)",
+                    "$B > 0",
+                    "OK",
+                    "warning",
+                    "rpc_fallback_active",
+                    channel,
+                    "RPC_URL kept failing polls for a minute, so polling moved to an endpoint from RPC_FALLBACK_URLS. Nothing is lost: the cursors carry over. The microscope_rpc_active_endpoint series at 1 names the endpoint in use, and polling returns to RPC_URL once it has answered probes for five minutes. Check the primary provider's status.",
+                    pending_seconds,
+                ),
+                prometheus_health_rule(
                     &format!("ms-rpc-checkpoint-stale-{channel}"),
                     &format!("RPC checkpoint stale [{channel}]"),
                     "time() - (microscope_rpc_checkpoint_last_success_unixtime or microscope_rpc_poll_started_unixtime)",
@@ -1137,6 +1149,26 @@ mod tests {
     /// streaming from a fallback is worth a warning even while nothing is lost.
     /// Without fallbacks the role series never exists, which must read as
     /// healthy rather than as missing data.
+    #[test]
+    fn warns_while_rpc_polling_runs_on_a_fallback_endpoint() {
+        let config = config(vec![]);
+        let channels = BTreeSet::from([AlertChannel::Slack]);
+
+        let without_rpc = provisioning_document(&config, &channels, false).unwrap();
+        assert!(health_rule(&without_rpc, "ms-rpc-fallback-slack").is_none());
+
+        let document = provisioning_document(&config, &channels, true).unwrap();
+        let rule = health_rule(&document, "ms-rpc-fallback-slack").unwrap();
+        assert_eq!(
+            rule["data"][0]["model"]["expr"],
+            "max(microscope_rpc_active_endpoint{role=\"fallback\"}) or on() vector(0)"
+        );
+        assert_eq!(rule["data"][2]["model"]["expression"], "$B > 0");
+        assert_eq!(rule["noDataState"], "OK");
+        assert_eq!(rule["labels"]["severity"], "warning");
+        assert_eq!(rule["labels"]["signal_name"], "rpc_fallback_active");
+    }
+
     #[test]
     fn warns_while_the_stream_runs_on_a_fallback_endpoint() {
         let config = config(vec![]);

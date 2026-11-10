@@ -162,6 +162,7 @@ resource "google_secret_manager_secret_version" "runtime" {
     geyser_fallback_urls       = join(",", [for fallback in var.geyser_fallbacks : fallback.url])
     geyser_fallback_x_tokens   = join(",", [for fallback in var.geyser_fallbacks : fallback.x_token])
     rpc_url                    = var.rpc_url
+    rpc_fallback_urls          = join(",", var.rpc_fallback_urls)
     grafana_admin_password     = var.grafana_admin_password
     slack_webhook_url          = var.slack_webhook_url
     telegram_bot_token         = var.telegram_bot_token
@@ -187,6 +188,10 @@ resource "google_secret_manager_secret_version" "runtime" {
     precondition {
       condition     = var.datasource.mode != "rpc" || length(trimspace(var.rpc_url)) > 0
       error_message = "rpc_url is required when datasource.mode is rpc."
+    }
+    precondition {
+      condition     = length(var.rpc_fallback_urls) == 0 || length(trimspace(var.rpc_url)) > 0
+      error_message = "rpc_fallback_urls requires rpc_url, the primary endpoint."
     }
     precondition {
       condition     = var.grafana_cloud != null || length(var.grafana_admin_password) >= 12

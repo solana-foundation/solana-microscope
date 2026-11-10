@@ -53,6 +53,7 @@ Read `crates/microscope-indexer/src/telemetry.rs` for the authoritative list. Th
 | Which endpoint is streaming, and did it switch | `microscope_yellowstone_active_endpoint` (1 on the endpoint in use), `microscope_yellowstone_failovers_total` |
 | Did an established stream drop, and how much did it miss | `microscope_yellowstone_disconnects_total`, `microscope_yellowstone_missed_slots_total` |
 | Is gap recovery on, and why not | `microscope_rpc_recovery_enabled`, `microscope_rpc_recovery_degraded` (the `reason` label) |
+| Which RPC endpoint is polled, and did it switch | `microscope_rpc_active_endpoint` (1 on the endpoint in use), `microscope_rpc_failovers_total` |
 | Is the poller working | `microscope_rpc_poll_last_success_unixtime`, `microscope_rpc_poll_failures_total`, `microscope_rpc_poll_lag_slots`, `microscope_rpc_poll_head_slot` |
 | Is the checkpoint advancing | `microscope_rpc_checkpoint_last_success_unixtime`, `microscope_rpc_checkpoint_slot`, `microscope_rpc_checkpoint_quarantined_files` |
 | What was skipped | `microscope_rpc_poll_quarantined_transactions`, `microscope_rpc_history_unavailable_total` |

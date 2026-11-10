@@ -16,7 +16,10 @@ one stops answering; see the README's datasource section.
 alongside Yellowstone, and is the datasource in `mode = "rpc"`. It must serve
 `getSignaturesForAddress` and `getTransaction` back to the checkpoint, so its
 history depth caps the outage recovery can survive. Public endpoints are
-rate-limited below what continuous polling needs.
+rate-limited below what continuous polling needs. `RPC_FALLBACK_URLS` adds
+endpoints from other providers that polling fails over to; put `RPC_URL` and
+`GEYSER_URL` on different providers, or one outage takes out both the stream
+and its recovery.
 
 Endpoint cost usually exceeds the machine cost below.
 
