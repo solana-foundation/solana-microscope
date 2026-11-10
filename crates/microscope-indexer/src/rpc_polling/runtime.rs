@@ -1,4 +1,7 @@
-use std::{fmt, time::Instant};
+use std::{
+    fmt,
+    time::{Duration, Instant},
+};
 
 use async_trait::async_trait;
 use carbon_core::{
@@ -14,10 +17,11 @@ use super::{
     checkpoint::{CheckpointLoadOutcome, CheckpointMismatch, CheckpointStore},
     monitored_addresses, unreachable_below, PollingState, RpcPollingDatasource,
 };
-use crate::{delivered::DeliveredSignatures, shipped, telemetry};
+use crate::{delivered::DeliveredSignatures, failover, shipped, telemetry};
 
 const CHECKPOINT_LOAD_ATTEMPTS: u32 = 3;
 const RECOVERY_DISABLE_AFTER_CONSECUTIVE: u32 = 3;
+const PROBE_INTERVAL: Duration = Duration::from_secs(15);
 
 #[derive(Debug)]
 pub(super) struct HistoryUnavailable {
@@ -64,8 +68,18 @@ impl Datasource for RpcPollingDatasource {
         sender: Sender<(Update, DatasourceId)>,
         cancellation_token: CancellationToken,
     ) -> CarbonResult<()> {
-        let rpc_client =
-            RpcClient::new_with_commitment(self.rpc_url.clone(), CommitmentConfig::confirmed());
+        let rpc_clients = self
+            .endpoints
+            .iter()
+            .map(|endpoint| {
+                RpcClient::new_with_commitment(endpoint.url.clone(), CommitmentConfig::confirmed())
+            })
+            .collect::<Vec<_>>();
+        let labels = self
+            .endpoints
+            .iter()
+            .map(|endpoint| endpoint.label.clone())
+            .collect::<Vec<_>>();
         let addresses = monitored_addresses(self.program_id, self.multisig_state_address);
         log::info!(
             "RPC polling monitors {}",
@@ -77,19 +91,32 @@ impl Datasource for RpcPollingDatasource {
         );
         telemetry::initialize_rpc_polling();
 
-        let genesis_hash = loop {
-            match rpc_client.get_genesis_hash().await {
-                Ok(genesis_hash) => break genesis_hash.to_string(),
-                Err(error) => {
-                    telemetry::record_rpc_poll_failure();
-                    log::error!("failed to read RPC genesis hash: {error}");
-                    tokio::select! {
-                        _ = cancellation_token.cancelled() => return Ok(()),
-                        _ = tokio::time::sleep(self.poll_interval) => {}
+        let mut health = vec![failover::ProbeHealth::default(); rpc_clients.len()];
+        let (mut active, genesis_hash) = 'genesis: loop {
+            for (index, rpc_client) in rpc_clients.iter().enumerate() {
+                match rpc_client.get_genesis_hash().await {
+                    Ok(genesis_hash) => {
+                        health[index].record(true, Instant::now());
+                        break 'genesis (index, genesis_hash.to_string());
+                    }
+                    Err(error) => {
+                        health[index].record(false, Instant::now());
+                        telemetry::record_rpc_poll_failure();
+                        log::error!(
+                            "failed to read the RPC genesis hash from {}: {error}",
+                            labels[index]
+                        );
                     }
                 }
             }
+            tokio::select! {
+                _ = cancellation_token.cancelled() => return Ok(()),
+                _ = tokio::time::sleep(self.poll_interval) => {}
+            }
         };
+        telemetry::initialize_rpc_failovers();
+        telemetry::set_rpc_active_endpoint(&labels, active);
+        let mut last_probe: Option<Instant> = None;
         let journal_identity = {
             let mut addresses = addresses
                 .iter()
@@ -100,7 +127,7 @@ impl Datasource for RpcPollingDatasource {
         };
         let mut checkpoint = CheckpointStore::new(
             self.checkpoint_path.clone(),
-            genesis_hash,
+            genesis_hash.clone(),
             self.program_id.to_string(),
             addresses.iter().map(ToString::to_string).collect(),
             self.replay_window_slots,
@@ -258,10 +285,19 @@ impl Datasource for RpcPollingDatasource {
                 }
             }
 
-            match self
-                .poll(&rpc_client, &sender, &id, &mut state, &addresses)
-                .await
-            {
+            let polled = self
+                .poll(&rpc_clients[active], &sender, &id, &mut state, &addresses)
+                .await;
+            match &polled {
+                Ok(_) => health[active].record(true, Instant::now()),
+                Err(error)
+                    if !error.is::<CursorAheadOfHead>() && !error.is::<HistoryUnavailable>() =>
+                {
+                    health[active].record(false, Instant::now())
+                }
+                Err(_) => {}
+            }
+            match polled {
                 Ok(outcome) => {
                     checkpoint_urgent = outcome.checkpoint_urgent;
                     cursors_ahead.record_recovered();
@@ -306,8 +342,25 @@ impl Datasource for RpcPollingDatasource {
                 }
                 Err(error) => {
                     telemetry::record_rpc_poll_failure();
-                    log::error!("RPC poll failed: {error:#}");
+                    log::error!("RPC poll failed on {}: {error:#}", labels[active]);
                 }
+            }
+
+            if rpc_clients.len() > 1
+                && last_probe.is_none_or(|probed| probed.elapsed() >= PROBE_INTERVAL)
+            {
+                last_probe = Some(Instant::now());
+                probe_standby(&rpc_clients, &labels, active, &genesis_hash, &mut health).await;
+            }
+            if let Some(next) = failover::next_endpoint(active, &health, Instant::now()) {
+                log::warn!(
+                    "switching RPC polling from {} to {}",
+                    labels[active],
+                    labels[next]
+                );
+                active = next;
+                telemetry::record_rpc_failover();
+                telemetry::set_rpc_active_endpoint(&labels, active);
             }
 
             let delay = self.poll_interval.saturating_sub(started.elapsed());
@@ -320,6 +373,47 @@ impl Datasource for RpcPollingDatasource {
 
     fn update_types(&self) -> Vec<UpdateType> {
         vec![UpdateType::Transaction]
+    }
+}
+
+/// The active endpoint's health comes from its polls; the others answer
+/// `getGenesisHash`, which also keeps an endpoint on another cluster from ever
+/// looking healthy enough to switch to.
+async fn probe_standby(
+    rpc_clients: &[RpcClient],
+    labels: &[String],
+    active: usize,
+    genesis_hash: &str,
+    health: &mut [failover::ProbeHealth],
+) {
+    let results = futures::future::join_all(
+        rpc_clients
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| *index != active)
+            .map(|(index, rpc_client)| async move { (index, rpc_client.get_genesis_hash().await) }),
+    )
+    .await;
+    let now = Instant::now();
+    for (index, result) in results {
+        let healthy = match result {
+            Ok(hash) if hash.to_string() == genesis_hash => true,
+            Ok(hash) => {
+                log::error!(
+                    "the RPC endpoint {} serves genesis hash {hash}, not {genesis_hash}; it is on another cluster and will never be used",
+                    labels[index]
+                );
+                false
+            }
+            Err(error) => {
+                log::warn!(
+                    "the standby RPC endpoint {} failed its probe: {error}",
+                    labels[index]
+                );
+                false
+            }
+        };
+        health[index].record(healthy, now);
     }
 }
 

@@ -145,6 +145,21 @@ variable "rpc_url" {
   }
 }
 
+variable "rpc_fallback_urls" {
+  description = "Optional Solana JSON-RPC endpoints from other providers, in priority order. Polling fails over to them when rpc_url stops answering."
+  type        = list(string)
+  sensitive   = true
+  default     = []
+
+  validation {
+    condition = alltrue([
+      for url in var.rpc_fallback_urls :
+      (startswith(url, "https://") || startswith(url, "http://")) && !strcontains(url, ",")
+    ])
+    error_message = "Every rpc_fallback_urls entry must be an HTTP(S) URL without a comma."
+  }
+}
+
 variable "grafana_admin_password" {
   description = "Initial Grafana administrator password. Required unless grafana_cloud is set."
   type        = string

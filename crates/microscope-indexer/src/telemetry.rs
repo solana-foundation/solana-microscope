@@ -143,6 +143,26 @@ pub fn set_yellowstone_active_endpoint(endpoints: &[String], active: usize) {
     }
 }
 
+pub fn initialize_rpc_failovers() {
+    metrics::counter!("microscope_rpc_failovers_total").increment(0);
+}
+
+pub fn record_rpc_failover() {
+    metrics::counter!("microscope_rpc_failovers_total").increment(1);
+}
+
+pub fn set_rpc_active_endpoint(endpoints: &[String], active: usize) {
+    for (index, endpoint) in endpoints.iter().enumerate() {
+        let role = if index == 0 { "primary" } else { "fallback" };
+        metrics::gauge!(
+            "microscope_rpc_active_endpoint",
+            "endpoint" => endpoint.clone(),
+            "role" => role
+        )
+        .set(if index == active { 1.0 } else { 0.0 });
+    }
+}
+
 /// Seeds every counter the polling panels chart. Unseeded, a metric that never
 /// fired, one that was renamed, and a target that was never scraped all render
 /// identically.

@@ -228,6 +228,15 @@ provider than `GEYSER_URL` or one outage takes out both. Metrics carry an
 `endpoint` label with the host alone, never the URL's path or query, and
 `microscope_yellowstone_active_endpoint` names the endpoint in use.
 
+`RPC_FALLBACK_URLS` does the same for the poller, in RPC mode and for gap
+recovery: comma-separated endpoints in priority order, used after `RPC_URL`
+fails polls for a minute and left once `RPC_URL` has answered probes for five
+minutes. The cursors carry over, so a switch loses nothing. A fallback is only
+used once it reports the same genesis hash as the endpoint the checkpoint was
+written against, so an endpoint on another cluster is never polled.
+`microscope_rpc_active_endpoint` names the endpoint in use. Backfill always uses
+`RPC_URL` or `--rpc-url`.
+
 `RPC_URL` is still worth setting. Recovery inside the stream lives in the
 process, so it covers disconnects but never restarts, outages longer than the
 retry budget, history past the provider's replay window, or undecodable

@@ -7,6 +7,7 @@ mod datasource;
 mod delivered;
 #[cfg(program_events)]
 mod events;
+mod failover;
 mod files;
 mod health;
 mod instructions;
