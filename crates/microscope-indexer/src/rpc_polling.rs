@@ -278,6 +278,7 @@ impl RpcPollingDatasource {
 
         let mut successful_updates = Vec::with_capacity(fetched.len());
         let mut retrying_signatures = HashSet::new();
+        let mut transient_failures = 0;
         for (signature, fetched_transaction) in fetched {
             match process_fetched_transaction(state, signature, fetched_transaction) {
                 TransactionPollOutcome::Ready { slot, update } => {
@@ -287,6 +288,7 @@ impl RpcPollingDatasource {
                     let context = &signature_contexts[&signature];
                     telemetry::record_rpc_transaction_failure();
                     retrying_signatures.insert(signature);
+                    transient_failures += 1;
                     log::warn!(
                         "RPC transaction {signature} at slot {} failed a transient fetch; cursors for {} remain unchanged until it succeeds: {error:#}",
                         context.slot,
@@ -371,6 +373,7 @@ impl RpcPollingDatasource {
         );
         Ok(PollOutcome {
             queued_transactions,
+            transient_failures,
             checkpoint_urgent: initialized || advanced_with_activity,
             history_boundary_verified,
         })
@@ -430,6 +433,7 @@ fn signatures_to_fetch(
 #[derive(Debug)]
 struct PollOutcome {
     queued_transactions: usize,
+    transient_failures: usize,
     checkpoint_urgent: bool,
     history_boundary_verified: bool,
 }
