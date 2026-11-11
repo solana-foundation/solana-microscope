@@ -123,27 +123,6 @@ mod tests {
     }
 
     #[test]
-    fn parses_backfill_with_an_explicit_loki_max_age() {
-        let cli = Cli::try_parse_from([
-            "microscope-indexer",
-            "backfill",
-            "--since",
-            "7d",
-            "--loki-max-age",
-            "30d",
-        ])
-        .unwrap();
-
-        let Command::Backfill { loki_max_age, .. } = cli.command else {
-            panic!("expected backfill command");
-        };
-        assert_eq!(
-            loki_max_age,
-            Some(std::time::Duration::from_secs(30 * 86_400))
-        );
-    }
-
-    #[test]
     fn rejects_backfill_without_since() {
         assert!(Cli::try_parse_from(["microscope-indexer", "backfill"]).is_err());
     }

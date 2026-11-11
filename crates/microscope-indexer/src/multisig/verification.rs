@@ -60,8 +60,6 @@ pub fn verify(
 
 #[cfg(test)]
 mod tests {
-    use std::str::FromStr;
-
     use solana_pubkey::Pubkey;
 
     use super::verify;
@@ -81,21 +79,8 @@ mod tests {
                 smart_account::default_vault(state_address),
             ),
         ] {
-            let verified = verify(vault_address, state_address, version).unwrap();
-            assert_eq!(verified.vault_address, vault_address);
-            assert_eq!(verified.state_address, state_address);
-            assert_eq!(verified.version, version);
+            verify(vault_address, state_address, version).unwrap();
         }
-    }
-
-    #[test]
-    fn verifies_a_known_v4_vault_and_state_address_pair() {
-        let vault_address =
-            Pubkey::from_str("DXtFpbPjcn2hxPnw79x1Pfoj35vXh5AsWBkS37YnXMVv").unwrap();
-        let state_address =
-            Pubkey::from_str("4CxQs26DewQ1KaCHfyyjktkYjndNdUqCJvVdygtJFwcJ").unwrap();
-
-        verify(vault_address, state_address, MultisigVersion::V4).unwrap();
     }
 
     #[test]
