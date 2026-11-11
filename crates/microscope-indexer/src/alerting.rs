@@ -386,6 +386,18 @@ fn yellowstone_health_rules(channels: &BTreeSet<AlertChannel>, pending_seconds: 
                                     pending_seconds,
                 ),
                 prometheus_health_rule(
+                    &format!("ms-yellowstone-degraded-{channel}"),
+                    &format!("Yellowstone endpoint failing its probe [{channel}]"),
+                    &format!("max(max_over_time(microscope_yellowstone_probe_healthy[{YELLOWSTONE_PROBE_WINDOW_SECONDS}s])) - min(max_over_time(microscope_yellowstone_probe_healthy[{YELLOWSTONE_PROBE_WINDOW_SECONDS}s]))"),
+                    "$B > 0",
+                    "OK",
+                    "warning",
+                    "yellowstone_endpoint_degraded",
+                    channel,
+                    "One configured Yellowstone endpoint fails every probe while another passes; the endpoint label on microscope_yellowstone_probe_healthy at 0 names it. Indexing continues on a healthy endpoint, but the failover this endpoint exists for has nowhere to go. A fallback that fails from the start usually has a wrong URL or token in GEYSER_FALLBACK_URLS or GEYSER_FALLBACK_X_TOKENS.",
+                    pending_seconds,
+                ),
+                prometheus_health_rule(
                     &format!("ms-yellowstone-fallback-{channel}"),
                     &format!("Yellowstone running on a fallback endpoint [{channel}]"),
                     "max(microscope_yellowstone_active_endpoint{role=\"fallback\"}) or on() vector(0)",
@@ -394,7 +406,7 @@ fn yellowstone_health_rules(channels: &BTreeSet<AlertChannel>, pending_seconds: 
                     "warning",
                     "yellowstone_fallback_active",
                     channel,
-                    "The primary Yellowstone endpoint failed its probe for a minute, so the stream moved to a fallback from GEYSER_FALLBACK_URLS. Indexing continues; the switch left a gap that RPC recovery replays when RPC_URL is configured. The microscope_yellowstone_active_endpoint series at 1 names the endpoint in use, and the stream returns to the primary once its probe has been healthy for five minutes. Check the primary provider's status.",
+                    "The primary Yellowstone endpoint failed its probe for a minute, so the stream moved to a fallback from GEYSER_FALLBACK_URLS. Indexing continues; the switch left a gap that RPC recovery replays when RPC_URL is configured. The microscope_yellowstone_active_endpoint series at 1 names the endpoint in use, and the stream returns to the primary once its probe has been healthy for five minutes, or longer each time the primary fails again right after a return. Check the primary provider's status.",
                     pending_seconds,
                 ),
             ]
@@ -514,6 +526,18 @@ fn rpc_health_rules(
                                     pending_seconds,
                 ),
                 prometheus_health_rule(
+                    &format!("ms-rpc-degraded-{channel}"),
+                    &format!("RPC endpoint unusable [{channel}]"),
+                    &format!("max(max_over_time(microscope_rpc_endpoint_healthy[{YELLOWSTONE_PROBE_WINDOW_SECONDS}s])) - min(max_over_time(microscope_rpc_endpoint_healthy[{YELLOWSTONE_PROBE_WINDOW_SECONDS}s]))"),
+                    "$B > 0",
+                    "OK",
+                    "warning",
+                    "rpc_endpoint_degraded",
+                    channel,
+                    "One configured RPC endpoint is unusable while another works; the endpoint label on microscope_rpc_endpoint_healthy at 0 names it. It fails its polls or probes, serves another cluster, or was given up on because it cannot serve the checkpoint (the indexer log says which). Polling continues on a working endpoint, but the failover this endpoint exists for has nowhere to go.",
+                    pending_seconds,
+                ),
+                prometheus_health_rule(
                     &format!("ms-rpc-fallback-{channel}"),
                     &format!("RPC polling on a fallback endpoint [{channel}]"),
                     "max(microscope_rpc_active_endpoint{role=\"fallback\"}) or on() vector(0)",
@@ -522,7 +546,7 @@ fn rpc_health_rules(
                     "warning",
                     "rpc_fallback_active",
                     channel,
-                    "RPC_URL kept failing polls for a minute, so polling moved to an endpoint from RPC_FALLBACK_URLS. Nothing is lost: the cursors carry over. The microscope_rpc_active_endpoint series at 1 names the endpoint in use, and polling returns to RPC_URL once it has answered probes for five minutes. Check the primary provider's status.",
+                    "RPC_URL kept failing polls for a minute, or cannot serve the checkpoint, so polling moved to an endpoint from RPC_FALLBACK_URLS. Nothing is lost: the cursors carry over. The microscope_rpc_active_endpoint series at 1 names the endpoint in use, and polling returns to RPC_URL once it has answered probes for five minutes, or longer each time it fails again right after a return; an endpoint given up on for its history is not returned to until the indexer restarts. Check the primary provider's status.",
                     pending_seconds,
                 ),
                 prometheus_health_rule(
@@ -1167,6 +1191,39 @@ mod tests {
         assert_eq!(rule["noDataState"], "OK");
         assert_eq!(rule["labels"]["severity"], "warning");
         assert_eq!(rule["labels"]["signal_name"], "rpc_fallback_active");
+    }
+
+    /// The unreachable alert takes the best endpoint, so a fallback with a
+    /// wrong token stays invisible until the primary dies and the failover
+    /// finds nowhere to go. All endpoints failing is the unreachable alert's.
+    #[test]
+    fn warns_when_one_endpoint_fails_while_another_works() {
+        let config = config(vec![]);
+        let channels = BTreeSet::from([AlertChannel::Slack]);
+        let document = provisioning_document(&config, &channels, true).unwrap();
+
+        for (uid, metric, signal) in [
+            (
+                "ms-yellowstone-degraded-slack",
+                "microscope_yellowstone_probe_healthy",
+                "yellowstone_endpoint_degraded",
+            ),
+            (
+                "ms-rpc-degraded-slack",
+                "microscope_rpc_endpoint_healthy",
+                "rpc_endpoint_degraded",
+            ),
+        ] {
+            let rule = health_rule(&document, uid).unwrap();
+            assert_eq!(
+                rule["data"][0]["model"]["expr"],
+                format!("max(max_over_time({metric}[120s])) - min(max_over_time({metric}[120s]))")
+            );
+            assert_eq!(rule["data"][2]["model"]["expression"], "$B > 0");
+            assert_eq!(rule["noDataState"], "OK");
+            assert_eq!(rule["labels"]["severity"], "warning");
+            assert_eq!(rule["labels"]["signal_name"], signal);
+        }
     }
 
     #[test]

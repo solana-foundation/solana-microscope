@@ -1,4 +1,5 @@
 use std::{
+    collections::{HashMap, HashSet},
     fmt,
     time::{Duration, Instant},
 };
@@ -10,6 +11,7 @@ use carbon_core::{
 };
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_commitment_config::CommitmentConfig;
+use solana_signature::Signature;
 use tokio::sync::mpsc::Sender;
 use tokio_util::sync::CancellationToken;
 
@@ -92,19 +94,18 @@ impl Datasource for RpcPollingDatasource {
         );
         telemetry::initialize_rpc_polling();
 
-        let mut health = vec![failover::ProbeHealth::default(); rpc_clients.len()];
         let checkpoint_genesis_hash = stored_genesis_hash(&self.checkpoint_path).await;
-        let (mut active, genesis_hash) = 'genesis: loop {
+        let candidates = startup_candidates(rpc_clients.len(), checkpoint_genesis_hash.is_some());
+        let (active, genesis_hash) = 'genesis: loop {
             let mut mismatched = None;
             let mut unreachable = false;
-            for (index, rpc_client) in rpc_clients.iter().enumerate() {
+            for (index, rpc_client) in rpc_clients.iter().enumerate().take(candidates) {
                 match rpc_client.get_genesis_hash().await {
                     Ok(genesis_hash)
                         if checkpoint_genesis_hash
                             .as_ref()
                             .is_some_and(|expected| *expected != genesis_hash.to_string()) =>
                     {
-                        health[index].record(false, Instant::now());
                         log::error!(
                             "the RPC endpoint {} serves genesis hash {genesis_hash}, not the checkpoint's {}; skipping it",
                             labels[index],
@@ -112,13 +113,9 @@ impl Datasource for RpcPollingDatasource {
                         );
                         mismatched.get_or_insert((index, genesis_hash.to_string()));
                     }
-                    Ok(genesis_hash) => {
-                        health[index].record(true, Instant::now());
-                        break 'genesis (index, genesis_hash.to_string());
-                    }
+                    Ok(genesis_hash) => break 'genesis (index, genesis_hash.to_string()),
                     Err(error) => {
                         unreachable = true;
-                        health[index].record(false, Instant::now());
                         telemetry::record_rpc_poll_failure();
                         log::error!(
                             "failed to read the RPC genesis hash from {}: {error}",
@@ -135,8 +132,13 @@ impl Datasource for RpcPollingDatasource {
                 _ = tokio::time::sleep(self.poll_interval) => {}
             }
         };
+        let mut failover = failover::Failover::new(rpc_clients.len(), active);
+        let mut failed_on = HashMap::new();
         telemetry::initialize_rpc_failovers();
         telemetry::set_rpc_active_endpoint(&labels, active);
+        for label in &labels {
+            telemetry::set_rpc_endpoint_healthy(label, true);
+        }
         let mut last_probe: Option<Instant> = None;
         let journal_identity = {
             let mut addresses = addresses
@@ -306,17 +308,25 @@ impl Datasource for RpcPollingDatasource {
                 }
             }
 
+            let active = failover.active();
             let polled = self
                 .poll(&rpc_clients[active], &sender, &id, &mut state, &addresses)
                 .await;
+            let mut untried = None;
             match &polled {
                 Ok(outcome) => {
-                    health[active].record(outcome.transient_failures == 0, Instant::now())
+                    untried = untried_endpoint(
+                        &outcome.transient_failures,
+                        &mut failed_on,
+                        active,
+                        (0..rpc_clients.len()).filter(|&index| failover.is_usable(index)),
+                    );
+                    failover.record(active, untried.is_none(), Instant::now());
                 }
                 Err(error)
                     if !error.is::<CursorAheadOfHead>() && !error.is::<HistoryUnavailable>() =>
                 {
-                    health[active].record(false, Instant::now())
+                    failover.record(active, false, Instant::now());
                 }
                 Err(_) => {}
             }
@@ -334,34 +344,35 @@ impl Datasource for RpcPollingDatasource {
                         );
                     }
                 }
-                Err(error) if error.is::<CursorAheadOfHead>() => {
-                    if cursors_ahead.record_gap() {
-                        return wait_with_recovery_disabled(
-                            &cancellation_token,
-                            self.delivered.as_ref(),
-                            "cursor_ahead_of_head",
-                            &format!("RPC recovery cannot continue: {error:#}"),
-                        )
-                        .await;
+                Err(error)
+                    if error.is::<CursorAheadOfHead>() || error.is::<HistoryUnavailable>() =>
+                {
+                    let (tracker, reason) = if error.is::<CursorAheadOfHead>() {
+                        (&mut cursors_ahead, "cursor_ahead_of_head")
+                    } else {
+                        telemetry::record_rpc_history_unavailable();
+                        (&mut history_gaps, "history_unavailable")
+                    };
+                    if !tracker.record_gap() {
+                        log::warn!(
+                            "{error:#}; {} is given up on after {RECOVERY_DISABLE_AFTER_CONSECUTIVE} consecutive observations in case this response came from a lagging RPC node",
+                            labels[active]
+                        );
+                    } else if failover.exclude_active() {
+                        if failover.all_excluded() {
+                            return wait_with_recovery_disabled(
+                                &cancellation_token,
+                                self.delivered.as_ref(),
+                                reason,
+                                &format!("RPC recovery cannot continue: {error:#}"),
+                            )
+                            .await;
+                        }
+                        log::error!(
+                            "{error:#}; RPC polling will not use {} again until the indexer restarts, and moves to another endpoint as soon as one is healthy",
+                            labels[active]
+                        );
                     }
-                    log::warn!(
-                        "{error:#}; recovery disables itself after {RECOVERY_DISABLE_AFTER_CONSECUTIVE} consecutive observations in case this response came from a lagging RPC node"
-                    );
-                }
-                Err(error) if error.is::<HistoryUnavailable>() => {
-                    telemetry::record_rpc_history_unavailable();
-                    if history_gaps.record_gap() {
-                        return wait_with_recovery_disabled(
-                            &cancellation_token,
-                            self.delivered.as_ref(),
-                            "history_unavailable",
-                            &format!("RPC recovery cannot continue: {error:#}"),
-                        )
-                        .await;
-                    }
-                    log::warn!(
-                        "{error:#}; recovery disables itself after {RECOVERY_DISABLE_AFTER_CONSECUTIVE} consecutive observations in case this response came from a lagging RPC node"
-                    );
                 }
                 Err(error) => {
                     telemetry::record_rpc_poll_failure();
@@ -369,27 +380,44 @@ impl Datasource for RpcPollingDatasource {
                 }
             }
 
-            if rpc_clients.len() > 1
-                && last_probe.is_none_or(|probed| probed.elapsed() >= PROBE_INTERVAL)
-            {
+            let probe_due = rpc_clients.len() > 1
+                && last_probe.is_none_or(|probed| probed.elapsed() >= PROBE_INTERVAL);
+            if probe_due {
                 last_probe = Some(Instant::now());
-                probe_standby(&rpc_clients, &labels, active, &genesis_hash, &mut health).await;
             }
-            if let Some(next) = failover::next_endpoint(active, &health, Instant::now()) {
+            let delay = self.poll_interval.saturating_sub(started.elapsed());
+            tokio::select! {
+                _ = cancellation_token.cancelled() => return Ok(()),
+                _ = async {
+                    tokio::join!(
+                        async {
+                            if probe_due {
+                                probe_standby(&rpc_clients, &labels, &genesis_hash, &mut failover)
+                                    .await;
+                            }
+                        },
+                        tokio::time::sleep(delay),
+                    )
+                } => {}
+            }
+            for (index, label) in labels.iter().enumerate() {
+                telemetry::set_rpc_endpoint_healthy(label, failover.is_usable(index));
+            }
+            let untried = untried.filter(|&index| failover.is_usable(index));
+            if let Some(next) = failover
+                .next(Instant::now())
+                .map(|next| untried.unwrap_or(next))
+            {
                 log::warn!(
                     "switching RPC polling from {} to {}",
                     labels[active],
                     labels[next]
                 );
-                active = next;
+                failover.switch_to(next, Instant::now());
+                history_gaps = HistoryGapTracker::default();
+                cursors_ahead = HistoryGapTracker::default();
                 telemetry::record_rpc_failover();
-                telemetry::set_rpc_active_endpoint(&labels, active);
-            }
-
-            let delay = self.poll_interval.saturating_sub(started.elapsed());
-            tokio::select! {
-                _ = cancellation_token.cancelled() => return Ok(()),
-                _ = tokio::time::sleep(delay) => {}
+                telemetry::set_rpc_active_endpoint(&labels, next);
             }
         }
     }
@@ -399,21 +427,57 @@ impl Datasource for RpcPollingDatasource {
     }
 }
 
+/// Without a checkpoint nothing vouches for a fallback's cluster, and the
+/// checkpoint it would write then rejects the primary across restarts, so only
+/// the primary may name the cluster.
+fn startup_candidates(endpoints: usize, checkpoint_names_cluster: bool) -> usize {
+    if checkpoint_names_cluster {
+        endpoints
+    } else {
+        1
+    }
+}
+
+/// Notes the active endpoint against every transaction it failed to fetch,
+/// forgets the ones fetched since, and returns the first usable endpoint that
+/// has not failed all of them yet. A failed fetch only counts against the
+/// active endpoint while such an endpoint is left to try: once every usable
+/// endpoint has failed a transaction, no switch can help, and counting it
+/// would bounce polling between endpoints forever.
+fn untried_endpoint(
+    failures: &HashSet<Signature>,
+    failed_on: &mut HashMap<Signature, HashSet<usize>>,
+    active: usize,
+    mut usable: impl Iterator<Item = usize>,
+) -> Option<usize> {
+    failed_on.retain(|signature, _| failures.contains(signature));
+    for signature in failures {
+        failed_on.entry(*signature).or_default().insert(active);
+    }
+    usable.find(|index| {
+        failed_on
+            .values()
+            .any(|endpoints| !endpoints.contains(index))
+    })
+}
+
 /// The active endpoint's health comes from its polls; the others answer
 /// `getGenesisHash`, which also keeps an endpoint on another cluster from ever
-/// looking healthy enough to switch to.
+/// looking healthy enough to switch to. Logs a standby only when its state
+/// changes.
 async fn probe_standby(
     rpc_clients: &[RpcClient],
     labels: &[String],
-    active: usize,
     genesis_hash: &str,
-    health: &mut [failover::ProbeHealth],
+    failover: &mut failover::Failover,
 ) {
+    let active = failover.active();
+    let started = Instant::now();
     let results = futures::future::join_all(
         rpc_clients
             .iter()
             .enumerate()
-            .filter(|(index, _)| *index != active)
+            .filter(|(index, _)| *index != active && failover.probe_due(*index, started))
             .map(|(index, rpc_client)| async move {
                 let result = tokio::time::timeout(PROBE_TIMEOUT, rpc_client.get_genesis_hash())
                     .await
@@ -425,24 +489,30 @@ async fn probe_standby(
     .await;
     let now = Instant::now();
     for (index, result) in results {
-        let healthy = match result {
-            Ok(hash) if hash.to_string() == genesis_hash => true,
-            Ok(hash) => {
-                log::error!(
-                    "the RPC endpoint {} serves genesis hash {hash}, not {genesis_hash}; it is on another cluster and will never be used",
-                    labels[index]
-                );
-                false
-            }
-            Err(error) => {
-                log::warn!(
-                    "the standby RPC endpoint {} failed its probe: {error}",
-                    labels[index]
-                );
-                false
-            }
+        let problem = match result {
+            Ok(hash) if hash.to_string() == genesis_hash => None,
+            Ok(hash) => Some((
+                log::Level::Error,
+                format!("serves genesis hash {hash}, not {genesis_hash}; it is on another cluster and will not be used"),
+            )),
+            Err(error) => Some((log::Level::Warn, format!("failed its probe: {error}"))),
         };
-        health[index].record(healthy, now);
+        if !failover.record(index, problem.is_none(), now) {
+            continue;
+        }
+        match problem {
+            None => log::info!(
+                "the standby RPC endpoint {} answers its probe",
+                labels[index]
+            ),
+            Some((level, problem)) => {
+                log::log!(
+                    level,
+                    "the standby RPC endpoint {} {problem}",
+                    labels[index]
+                )
+            }
+        }
     }
 }
 
@@ -499,7 +569,64 @@ async fn wait_with_recovery_disabled(
 mod tests {
     use tokio_util::sync::CancellationToken;
 
-    use super::{pipeline_drained, wait_with_recovery_disabled, HistoryGapTracker};
+    use std::collections::{HashMap, HashSet};
+
+    use super::{
+        pipeline_drained, startup_candidates, untried_endpoint, wait_with_recovery_disabled,
+        HistoryGapTracker,
+    };
+    use crate::test_support::signature;
+
+    /// A fallback pointed at another cluster would otherwise write a
+    /// checkpoint that rejects the primary from then on.
+    #[test]
+    fn only_the_primary_names_the_cluster_until_a_checkpoint_does() {
+        assert_eq!(startup_candidates(3, false), 1);
+        assert_eq!(startup_candidates(3, true), 3);
+    }
+
+    /// With only the previous endpoint remembered, two endpoints that cannot
+    /// fetch a transaction would hide a third that can.
+    #[test]
+    fn a_failing_transaction_is_tried_on_every_usable_endpoint_and_then_stops_counting() {
+        let poison = HashSet::from([signature(1)]);
+        let mut failed_on = HashMap::new();
+
+        assert_eq!(untried_endpoint(&poison, &mut failed_on, 0, 0..3), Some(1));
+        assert_eq!(untried_endpoint(&poison, &mut failed_on, 1, 0..3), Some(2));
+        assert_eq!(untried_endpoint(&poison, &mut failed_on, 2, 0..3), None);
+        assert_eq!(untried_endpoint(&poison, &mut failed_on, 0, 0..3), None);
+
+        let another = HashSet::from([signature(1), signature(2)]);
+        assert_eq!(untried_endpoint(&another, &mut failed_on, 0, 0..3), Some(1));
+    }
+
+    #[test]
+    fn a_failing_transaction_does_not_count_while_no_other_endpoint_is_usable() {
+        let poison = HashSet::from([signature(1)]);
+        let mut failed_on = HashMap::new();
+
+        assert_eq!(
+            untried_endpoint(&poison, &mut failed_on, 0, [0].into_iter()),
+            None
+        );
+        assert_eq!(untried_endpoint(&poison, &mut failed_on, 0, 0..2), Some(1));
+    }
+
+    #[test]
+    fn a_transaction_fetched_since_is_forgotten() {
+        let poison = HashSet::from([signature(1)]);
+        let mut failed_on = HashMap::new();
+        untried_endpoint(&poison, &mut failed_on, 0, 0..2);
+        untried_endpoint(&poison, &mut failed_on, 1, 0..2);
+
+        assert_eq!(
+            untried_endpoint(&HashSet::new(), &mut failed_on, 1, 0..2),
+            None
+        );
+        assert!(failed_on.is_empty());
+        assert_eq!(untried_endpoint(&poison, &mut failed_on, 1, 0..2), Some(0));
+    }
 
     #[test]
     fn one_history_gap_response_does_not_disable_recovery() {

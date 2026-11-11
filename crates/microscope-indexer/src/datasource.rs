@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     env,
+    future::Future,
     time::{Duration, Instant},
 };
 
@@ -13,13 +14,16 @@ use carbon_core::{
 use carbon_yellowstone_grpc_datasource::{
     YellowstoneGrpcClientConfig, YellowstoneGrpcGeyserClient,
 };
+use futures::StreamExt;
 use solana_pubkey::Pubkey;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use yellowstone_grpc_client::{
     Backoff, GeyserGrpcClient, ReconnectConfig, ReconnectionPolicy, DEFAULT_SLOT_RETENTION,
 };
-use yellowstone_grpc_proto::geyser::{CommitmentLevel, SubscribeRequestFilterTransactions};
+use yellowstone_grpc_proto::geyser::{
+    CommitmentLevel, SubscribeRequest, SubscribeRequestFilterTransactions,
+};
 
 use crate::{delivered::DeliveredSignatures, failover, health, telemetry};
 
@@ -32,6 +36,9 @@ const FORWARDING_BUFFER: usize = DEFAULT_CHANNEL_BUFFER_SIZE;
 /// Several attempts have to fit inside the grace window, or a single dropped
 /// probe decides readiness on its own.
 const PROBE_INTERVAL: Duration = Duration::from_secs(15);
+/// How long a probe waits for the endpoint to reject or close a subscription
+/// it accepted. Silence past this passes: the probe subscribes to nothing.
+const PROBE_REJECTION_GRACE: Duration = Duration::from_secs(2);
 /// A reconnect attempt schedule of 1s, 2s, 4s, 8s and 16s. The client replays
 /// from the slot it last saw across all of them, so an outage only becomes a
 /// gap once the whole budget is spent.
@@ -92,44 +99,27 @@ fn endpoints(
     if url.is_empty() {
         return Err("GEYSER_URL env var must be set to a Yellowstone gRPC endpoint".to_string());
     }
-    let fallback_urls = fallback_urls
-        .filter(|urls| !urls.trim().is_empty())
-        .map(|urls| urls.split(',').map(str::trim).collect::<Vec<_>>())
-        .unwrap_or_default();
+    let urls = failover::endpoints("Yellowstone", url, fallback_urls)?;
+    let fallbacks = urls.len() - 1;
     let fallback_x_tokens = match fallback_x_tokens.filter(|tokens| !tokens.is_empty()) {
-        None => vec![""; fallback_urls.len()],
+        None => vec![""; fallbacks],
         Some(tokens) => tokens.split(',').map(str::trim).collect(),
     };
-    if fallback_x_tokens.len() != fallback_urls.len() {
+    if fallback_x_tokens.len() != fallbacks {
         return Err(format!(
-            "GEYSER_FALLBACK_X_TOKENS lists {} token(s) for {} GEYSER_FALLBACK_URLS entries; give one per URL, leaving an entry empty for an endpoint without a token",
-            fallback_x_tokens.len(),
-            fallback_urls.len()
+            "GEYSER_FALLBACK_X_TOKENS lists {} token(s) for {fallbacks} GEYSER_FALLBACK_URLS entries; give one per URL, leaving an entry empty for an endpoint without a token",
+            fallback_x_tokens.len()
         ));
     }
-
-    let mut endpoints = Vec::with_capacity(1 + fallback_urls.len());
-    for (url, x_token) in std::iter::once((url, x_token.unwrap_or_default()))
-        .chain(fallback_urls.into_iter().zip(fallback_x_tokens))
-    {
-        let label = failover::endpoint_label(url).ok_or_else(|| {
-            format!("every Yellowstone endpoint must be an HTTP(S) URL naming a host, not {url:?}")
-        })?;
-        if endpoints
-            .iter()
-            .any(|endpoint: &Endpoint| endpoint.label == label)
-        {
-            return Err(format!(
-                "Yellowstone endpoint {label} is listed twice; each endpoint needs its own host"
-            ));
-        }
-        endpoints.push(Endpoint {
+    Ok(urls
+        .into_iter()
+        .zip(std::iter::once(x_token.unwrap_or_default()).chain(fallback_x_tokens))
+        .map(|((url, label), x_token)| Endpoint {
             url: url.to_string(),
             x_token: Some(x_token.to_string()).filter(|token| !token.is_empty()),
             label,
-        });
-    }
-    Ok(endpoints)
+        })
+        .collect())
 }
 
 /// How long the endpoint may fail the probe continuously before `/readyz`
@@ -148,8 +138,9 @@ fn probe_grace_seconds() -> u64 {
     })
 }
 
-/// Streams from one endpoint at a time. Carbon retries a dead endpoint forever
-/// and never returns, so leaving one is decided here, from the probes.
+/// Streams from one endpoint, and from two only while a switch hands over.
+/// Carbon retries a dead endpoint forever and never returns, so leaving one is
+/// decided here, from the probes.
 pub struct FailoverDatasource {
     endpoints: Vec<Endpoint>,
     clients: Vec<YellowstoneGrpcGeyserClient>,
@@ -188,31 +179,67 @@ impl FailoverDatasource {
         }
     }
 
-    async fn probe_all(&self, health: &mut [failover::ProbeHealth]) {
+    async fn probe_due(&self, failover: &mut failover::Failover) {
+        let started = Instant::now();
         let results = futures::future::join_all(
             self.endpoints
                 .iter()
-                .map(|endpoint| probe_get_version(&endpoint.url, endpoint.x_token.clone())),
+                .enumerate()
+                .filter(|(index, _)| failover.probe_due(*index, started))
+                .map(|(index, endpoint)| async move { (index, probe_subscribe(endpoint).await) }),
         )
         .await;
         let now = Instant::now();
-        for ((endpoint, state), result) in self.endpoints.iter().zip(health).zip(results) {
-            state.record(result.is_ok(), now);
+        for (index, result) in results {
+            let endpoint = &self.endpoints[index];
+            let changed = failover.record(index, result.is_ok(), now);
             match result {
                 Ok(()) => {
                     health::record_stream_probe_success();
                     telemetry::set_yellowstone_probe_healthy(&endpoint.label, true);
+                    if changed {
+                        log::info!(
+                            "the Yellowstone endpoint {} passes its readiness probe",
+                            endpoint.label
+                        );
+                    }
                 }
                 Err(error) => {
-                    log::warn!(
-                        "the Yellowstone endpoint {} failed its readiness probe: {error}",
-                        endpoint.label
-                    );
                     telemetry::record_yellowstone_probe_failure(&endpoint.label);
+                    if changed {
+                        log::warn!(
+                            "the Yellowstone endpoint {} failed its readiness probe: {error}",
+                            endpoint.label
+                        );
+                    }
                 }
             }
         }
     }
+}
+
+/// Opens the stream the policy asks for and only then lets go of the running
+/// one, which is returned for the caller to cancel once the new subscription
+/// has had time to start: the pipeline deduplicates the overlap, while a
+/// cancel-first switch drops whatever lands during the dial. A dial that fails
+/// leaves the running stream and the active endpoint as they were.
+async fn move_stream<Opening>(
+    failover: &mut failover::Failover,
+    stream: &mut Option<CancellationToken>,
+    now: Instant,
+    open: impl FnOnce(usize) -> Opening,
+) -> Option<CancellationToken>
+where
+    Opening: Future<Output = Option<CancellationToken>>,
+{
+    let target = failover
+        .next(now)
+        .or_else(|| stream.is_none().then(|| failover.active()))?;
+    let opened = open(target).await?;
+    if target != failover.active() {
+        failover.switch_to(target, now);
+    }
+    stream.replace(opened)
 }
 
 #[async_trait]
@@ -223,9 +250,9 @@ impl Datasource for FailoverDatasource {
         sender: mpsc::Sender<(Update, DatasourceId)>,
         cancellation_token: CancellationToken,
     ) -> CarbonResult<()> {
-        let mut health = vec![failover::ProbeHealth::default(); self.endpoints.len()];
-        let mut active = 0;
-        let mut stream = self.open(active, &id, &sender, &cancellation_token).await;
+        let mut failover = failover::Failover::new(self.endpoints.len(), 0);
+        let mut stream = self.open(0, &id, &sender, &cancellation_token).await;
+        let mut retiring: Option<CancellationToken> = None;
         let mut probes = tokio::time::interval(PROBE_INTERVAL);
         probes.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
@@ -233,25 +260,26 @@ impl Datasource for FailoverDatasource {
                 _ = cancellation_token.cancelled() => return Ok(()),
                 _ = probes.tick() => {}
             }
+            if let Some(retired) = retiring.take() {
+                retired.cancel();
+            }
             tokio::select! {
                 _ = cancellation_token.cancelled() => return Ok(()),
-                _ = self.probe_all(&mut health) => {}
+                _ = self.probe_due(&mut failover) => {}
             }
-            if let Some(next) = failover::next_endpoint(active, &health, Instant::now()) {
+            let left = failover.active();
+            retiring = move_stream(&mut failover, &mut stream, Instant::now(), |index| {
+                self.open(index, &id, &sender, &cancellation_token)
+            })
+            .await;
+            if failover.active() != left {
                 log::warn!(
                     "switching the Yellowstone stream from {} to {}",
-                    self.endpoints[active].label,
-                    self.endpoints[next].label
+                    self.endpoints[left].label,
+                    self.endpoints[failover.active()].label
                 );
-                if let Some(stream) = stream.take() {
-                    stream.cancel();
-                }
-                active = next;
                 telemetry::record_yellowstone_failover();
-                telemetry::set_yellowstone_active_endpoint(&self.labels(), active);
-            }
-            if stream.is_none() {
-                stream = self.open(active, &id, &sender, &cancellation_token).await;
+                telemetry::set_yellowstone_active_endpoint(&self.labels(), failover.active());
             }
         }
     }
@@ -261,22 +289,28 @@ impl Datasource for FailoverDatasource {
     }
 }
 
-/// Stream silence proves nothing (it only carries the monitored program), so
-/// probe with `GetVersion`: the cheapest Geyser call, behind the same
-/// `x-token` interceptor as `Subscribe`, so a bad token fails identically.
-/// Dials from scratch each probe, covering DNS, TLS and the token the way a
-/// fresh subscription would.
-async fn probe_get_version(geyser_url: &str, x_token: Option<String>) -> Result<(), String> {
-    let builder = GeyserGrpcClient::build_from_shared(geyser_url.to_string())
-        .and_then(|builder| builder.x_token(x_token))
+/// Stream silence proves nothing (it only carries the monitored program), and
+/// an endpoint can answer unary calls while refusing streams (a quota, a plan
+/// without streaming), which Carbon only logs. So the probe subscribes the way
+/// the stream does: a fresh dial covering DNS, TLS and the token, then a
+/// subscription. It asks for no filters, so the endpoint sends pings and no
+/// transactions: every endpoint is probed for as long as the indexer runs, and
+/// replaying the stream into each probe would bill that data many times over.
+async fn probe_subscribe(endpoint: &Endpoint) -> Result<(), String> {
+    let builder = GeyserGrpcClient::build_from_shared(endpoint.url.clone())
+        .and_then(|builder| builder.x_token(endpoint.x_token.clone()))
         .and_then(|builder| YellowstoneGrpcClientConfig::default().geyser_config_builder(builder))
         .map_err(|error| error.to_string())?;
-    let mut client = builder.connect().await.map_err(|error| error.to_string())?;
-    client
-        .get_version()
+    let mut connection = builder.connect().await.map_err(|error| error.to_string())?;
+    let (_requests, mut updates) = connection
+        .subscribe_with_request(Some(SubscribeRequest::default()))
         .await
-        .map(|_| ())
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    match tokio::time::timeout(PROBE_REJECTION_GRACE, updates.next()).await {
+        Ok(Some(Err(status))) => Err(status.to_string()),
+        Ok(None) => Err("the endpoint closed the subscription as soon as it opened".to_string()),
+        Ok(Some(Ok(_))) | Err(_) => Ok(()),
+    }
 }
 
 fn client(
@@ -428,11 +462,15 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::{
-        client, endpoints, reconnect, record_disconnections, transaction_filters, Endpoint,
-        RecordingDatasource, DEFAULT_CHANNEL_BUFFER_SIZE, STREAM_TIMEOUT,
+        client, endpoints, move_stream, reconnect, record_disconnections, transaction_filters,
+        Endpoint, RecordingDatasource, DEFAULT_CHANNEL_BUFFER_SIZE, STREAM_TIMEOUT,
     };
-    use crate::{delivered::DeliveredSignatures, test_support::signature};
-    use std::time::Duration;
+    use crate::{
+        delivered::DeliveredSignatures,
+        failover::{Failover, FAILOVER_AFTER},
+        test_support::signature,
+    };
+    use std::time::{Duration, Instant};
     use yellowstone_grpc_client::ReconnectionPolicy;
 
     fn transaction_update(signature: Signature, slot: u64) -> Update {
@@ -656,6 +694,78 @@ mod tests {
             .unwrap();
 
         assert!(delivered.drain().await.is_empty());
+    }
+
+    /// The primary has failed long enough to leave, and the fallback is
+    /// healthy.
+    fn failover_due(now: Instant) -> Failover {
+        let mut failover = Failover::new(2, 0);
+        failover.record(0, false, now - FAILOVER_AFTER);
+        failover.record(1, true, now - FAILOVER_AFTER);
+        failover
+    }
+
+    /// Cancelling first leaves no stream at all when the dial then fails, and
+    /// drops what lands during the dial when it succeeds.
+    #[tokio::test]
+    async fn opens_the_next_endpoint_before_letting_go_of_the_running_stream() {
+        let now = Instant::now();
+        let mut failover = failover_due(now);
+        let running = CancellationToken::new();
+        let opened = CancellationToken::new();
+        let mut stream = Some(running.clone());
+
+        let retiring = move_stream(&mut failover, &mut stream, now, |index| {
+            assert_eq!(index, 1);
+            std::future::ready(Some(opened.clone()))
+        })
+        .await
+        .expect("the stream that was running is handed back to retire");
+
+        assert_eq!(failover.active(), 1);
+        assert!(!running.is_cancelled());
+        retiring.cancel();
+        assert!(running.is_cancelled());
+        stream.unwrap().cancel();
+        assert!(opened.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn keeps_the_running_stream_and_endpoint_when_the_next_one_cannot_be_opened() {
+        let now = Instant::now();
+        let mut failover = failover_due(now);
+        let running = CancellationToken::new();
+        let mut stream = Some(running.clone());
+
+        let retiring = move_stream(&mut failover, &mut stream, now, |_| {
+            std::future::ready(None)
+        })
+        .await;
+
+        assert!(retiring.is_none());
+        assert_eq!(failover.active(), 0);
+        assert!(stream.is_some());
+        assert!(!running.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn reopens_the_active_endpoint_when_no_stream_is_running_and_leaves_a_running_one() {
+        let now = Instant::now();
+        let mut failover = Failover::new(2, 0);
+        let mut stream = None;
+
+        let retiring = move_stream(&mut failover, &mut stream, now, |index| {
+            assert_eq!(index, 0);
+            std::future::ready(Some(CancellationToken::new()))
+        })
+        .await;
+        assert!(retiring.is_none());
+        assert!(stream.is_some());
+
+        move_stream(&mut failover, &mut stream, now, |_| async {
+            panic!("a running stream on a healthy endpoint is left alone")
+        })
+        .await;
     }
 
     fn endpoint(url: &str) -> Endpoint {

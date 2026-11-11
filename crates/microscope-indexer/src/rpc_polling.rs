@@ -278,7 +278,7 @@ impl RpcPollingDatasource {
 
         let mut successful_updates = Vec::with_capacity(fetched.len());
         let mut retrying_signatures = HashSet::new();
-        let mut transient_failures = 0;
+        let mut transient_failures = HashSet::new();
         for (signature, fetched_transaction) in fetched {
             match process_fetched_transaction(state, signature, fetched_transaction) {
                 TransactionPollOutcome::Ready { slot, update } => {
@@ -288,7 +288,7 @@ impl RpcPollingDatasource {
                     let context = &signature_contexts[&signature];
                     telemetry::record_rpc_transaction_failure();
                     retrying_signatures.insert(signature);
-                    transient_failures += 1;
+                    transient_failures.insert(signature);
                     log::warn!(
                         "RPC transaction {signature} at slot {} failed a transient fetch; cursors for {} remain unchanged until it succeeds: {error:#}",
                         context.slot,
@@ -433,42 +433,19 @@ fn signatures_to_fetch(
 #[derive(Debug)]
 struct PollOutcome {
     queued_transactions: usize,
-    transient_failures: usize,
+    transient_failures: HashSet<Signature>,
     checkpoint_urgent: bool,
     history_boundary_verified: bool,
 }
 
-/// docker-compose passes the variable through even when unset, so an empty
-/// list means no fallbacks.
 fn rpc_endpoints(url: &str, fallback_urls: Option<&str>) -> Result<Vec<RpcEndpoint>, String> {
-    let fallback_urls = fallback_urls
-        .filter(|urls| !urls.trim().is_empty())
-        .map(|urls| urls.split(',').map(str::trim).collect::<Vec<_>>())
-        .unwrap_or_default();
-    let mut endpoints: Vec<RpcEndpoint> = Vec::with_capacity(1 + fallback_urls.len());
-    for url in std::iter::once(url).chain(fallback_urls) {
-        let label = failover::endpoint_label(url)
-            .filter(|_| valid_rpc_url(url))
-            .ok_or_else(|| {
-                "RPC_URL and every RPC_FALLBACK_URLS entry must be a valid HTTP(S) URL".to_string()
-            })?;
-        if endpoints.iter().any(|endpoint| endpoint.label == label) {
-            return Err(format!(
-                "RPC endpoint {label} is listed twice; each endpoint needs its own host"
-            ));
-        }
-        endpoints.push(RpcEndpoint {
+    Ok(failover::endpoints("RPC", url, fallback_urls)?
+        .into_iter()
+        .map(|(url, label)| RpcEndpoint {
             url: url.to_string(),
             label,
-        });
-    }
-    Ok(endpoints)
-}
-
-fn valid_rpc_url(value: &str) -> bool {
-    reqwest::Url::parse(value)
-        .ok()
-        .is_some_and(|url| matches!(url.scheme(), "http" | "https"))
+        })
+        .collect())
 }
 
 enum TransactionPollOutcome {
@@ -534,8 +511,8 @@ mod tests {
 
     use super::{
         advance_ready_cursors, cursor_ahead_of_head, process_fetched_transaction, rpc_endpoints,
-        signatures, signatures_to_fetch, valid_rpc_url, AddressCursor, DeliveredSignatures,
-        PollingState, RpcClient, RpcPollingDatasource, TransactionPollOutcome,
+        signatures, signatures_to_fetch, AddressCursor, DeliveredSignatures, PollingState,
+        RpcClient, RpcPollingDatasource, TransactionPollOutcome,
     };
     use crate::{
         backfill::FetchError,
@@ -545,10 +522,10 @@ mod tests {
 
     #[test]
     fn accepts_only_http_rpc_urls() {
-        assert!(valid_rpc_url("https://rpc.example.com"));
-        assert!(valid_rpc_url("http://127.0.0.1:8899"));
-        assert!(!valid_rpc_url("rpc.example.com"));
-        assert!(!valid_rpc_url("ftp://rpc.example.com"));
+        assert!(rpc_endpoints("https://rpc.example.com", None).is_ok());
+        assert!(rpc_endpoints("http://127.0.0.1:8899", None).is_ok());
+        assert!(rpc_endpoints("rpc.example.com", None).is_err());
+        assert!(rpc_endpoints("ftp://rpc.example.com", None).is_err());
     }
 
     #[test]

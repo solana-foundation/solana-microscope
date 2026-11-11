@@ -111,7 +111,9 @@ delete the file.
 
 `microscope_rpc_recovery_degraded` carries a `reason` label: exhausted history,
 a cursor beyond the confirmed head, or a checkpoint failure. It stays off until
-restart. For exhausted history, point `RPC_URL` at an endpoint holding the
+restart. With `RPC_FALLBACK_URLS` set, an endpoint that cannot serve the
+checkpoint is only given up on, and recovery disables itself once every
+endpoint has been. For exhausted history, point `RPC_URL` at an endpoint holding the
 missing slots, or backfill the gap and remove the checkpoint. A checkpoint whose
 cluster, program, or addresses do not match the deployment disables recovery on
 purpose; fix the config or endpoint, and remove it only if the target genuinely

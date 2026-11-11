@@ -132,14 +132,14 @@ pub fn record_yellowstone_failover() {
 }
 
 pub fn set_yellowstone_active_endpoint(endpoints: &[String], active: usize) {
+    set_active_endpoint("microscope_yellowstone_active_endpoint", endpoints, active);
+}
+
+fn set_active_endpoint(metric: &'static str, endpoints: &[String], active: usize) {
     for (index, endpoint) in endpoints.iter().enumerate() {
         let role = if index == 0 { "primary" } else { "fallback" };
-        metrics::gauge!(
-            "microscope_yellowstone_active_endpoint",
-            "endpoint" => endpoint.clone(),
-            "role" => role
-        )
-        .set(if index == active { 1.0 } else { 0.0 });
+        metrics::gauge!(metric, "endpoint" => endpoint.clone(), "role" => role)
+            .set(if index == active { 1.0 } else { 0.0 });
     }
 }
 
@@ -152,15 +152,14 @@ pub fn record_rpc_failover() {
 }
 
 pub fn set_rpc_active_endpoint(endpoints: &[String], active: usize) {
-    for (index, endpoint) in endpoints.iter().enumerate() {
-        let role = if index == 0 { "primary" } else { "fallback" };
-        metrics::gauge!(
-            "microscope_rpc_active_endpoint",
-            "endpoint" => endpoint.clone(),
-            "role" => role
-        )
-        .set(if index == active { 1.0 } else { 0.0 });
-    }
+    set_active_endpoint("microscope_rpc_active_endpoint", endpoints, active);
+}
+
+/// A fallback that never worked is otherwise invisible until the failover
+/// that needs it.
+pub fn set_rpc_endpoint_healthy(endpoint: &str, healthy: bool) {
+    metrics::gauge!("microscope_rpc_endpoint_healthy", "endpoint" => endpoint.to_string())
+        .set(if healthy { 1.0 } else { 0.0 });
 }
 
 /// Seeds every counter the polling panels chart. Unseeded, a metric that never
