@@ -1,14 +1,12 @@
-//! The ordered failover policy shared by the Yellowstone stream and the RPC
-//! poller: which endpoint to use, given how long each has been failing or
-//! healthy.
+//! Failover policy shared by the Yellowstone stream and the RPC poller: which
+//! endpoint to use, given how long each has been failing or healthy.
 
 use std::time::{Duration, Instant};
 
-/// How long the active endpoint may keep failing before the datasource moves
-/// to the next healthy one.
+/// How long the active endpoint may fail before the datasource leaves it.
 pub(crate) const FAILOVER_AFTER: Duration = Duration::from_secs(60);
 /// How long a higher-priority endpoint must stay healthy before the
-/// datasource moves back to it.
+/// datasource returns to it.
 pub(crate) const FAILBACK_AFTER: Duration = Duration::from_secs(300);
 /// An endpoint that fails again soon after the datasource returned to it waits
 /// twice as long each time, up to this, so a probe that passes while real use
@@ -80,8 +78,6 @@ impl ProbeHealth {
     }
 }
 
-/// Which endpoint a datasource uses, given how long each has been failing or
-/// healthy.
 #[derive(Debug)]
 pub(crate) struct Failover {
     active: usize,

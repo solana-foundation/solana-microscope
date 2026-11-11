@@ -88,8 +88,8 @@ pub fn yellowstone(program_id: &str, multisig_state_address: Option<Pubkey>) -> 
     datasource
 }
 
-/// docker-compose passes every variable through even when unset, so an empty
-/// value means "not configured", for the lists as for the single token.
+/// docker-compose passes unset variables through as empty, so empty means not
+/// configured, for the lists as for the single token.
 fn endpoints(
     url: &str,
     x_token: Option<&str>,
@@ -218,11 +218,10 @@ impl FailoverDatasource {
     }
 }
 
-/// Opens the stream the policy asks for and only then lets go of the running
-/// one, which is returned for the caller to cancel once the new subscription
-/// has had time to start: the pipeline deduplicates the overlap, while a
-/// cancel-first switch drops whatever lands during the dial. A dial that fails
-/// leaves the running stream and the active endpoint as they were.
+/// Opens the new stream before releasing the running one, which the caller
+/// cancels once the new subscription has had time to start: the pipeline
+/// deduplicates the overlap, while cancel-first drops whatever lands during
+/// the dial. A failed dial changes nothing.
 async fn move_stream<Opening>(
     failover: &mut failover::Failover,
     stream: &mut Option<CancellationToken>,
@@ -291,11 +290,9 @@ impl Datasource for FailoverDatasource {
 
 /// Stream silence proves nothing (it only carries the monitored program), and
 /// an endpoint can answer unary calls while refusing streams (a quota, a plan
-/// without streaming), which Carbon only logs. So the probe subscribes the way
-/// the stream does: a fresh dial covering DNS, TLS and the token, then a
-/// subscription. It asks for no filters, so the endpoint sends pings and no
-/// transactions: every endpoint is probed for as long as the indexer runs, and
-/// replaying the stream into each probe would bill that data many times over.
+/// without streaming), which Carbon only logs. So the probe dials fresh (DNS,
+/// TLS, token) and subscribes. Without filters the endpoint sends only pings,
+/// so probing for as long as the indexer runs is never billed as stream data.
 async fn probe_subscribe(endpoint: &Endpoint) -> Result<(), String> {
     let builder = GeyserGrpcClient::build_from_shared(endpoint.url.clone())
         .and_then(|builder| builder.x_token(endpoint.x_token.clone()))
@@ -696,8 +693,6 @@ mod tests {
         assert!(delivered.drain().await.is_empty());
     }
 
-    /// The primary has failed long enough to leave, and the fallback is
-    /// healthy.
     fn failover_due(now: Instant) -> Failover {
         let mut failover = Failover::new(2, 0);
         failover.record(0, false, now - FAILOVER_AFTER);
