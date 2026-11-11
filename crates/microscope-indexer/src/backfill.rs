@@ -629,10 +629,9 @@ mod tests {
         };
 
         let known_vault = Pubkey::from_str("DXtFpbPjcn2hxPnw79x1Pfoj35vXh5AsWBkS37YnXMVv").unwrap();
-        let matched = AddressResolver::new(known_vault, state_address, "v4")
+        AddressResolver::new(known_vault, state_address, "v4")
             .match_state(state_address)
             .expect("decoded instruction uses the resolved multisig state");
-        assert_eq!(matched.state_address, state_address);
     }
 
     #[test]

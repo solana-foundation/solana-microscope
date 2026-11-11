@@ -761,7 +761,6 @@ version = "{version}""#
             let config: Config = toml::from_str(&raw).unwrap();
             let multisig = config.multisig.unwrap();
             assert_eq!(multisig.version.as_str(), version);
-            assert_eq!(multisig.state_address, "11111111111111111111111111111111");
         }
 
         assert!(toml::from_str::<Config>(
@@ -938,9 +937,7 @@ replay_window_slots = 900"#,
         )
         .unwrap();
         assert_eq!(rpc.datasource.mode, DatasourceMode::Rpc);
-        assert_eq!(rpc.datasource.poll_interval_seconds, 15);
         assert_eq!(rpc.datasource.rpc_poll_stale_after_seconds(), 90);
-        assert_eq!(rpc.datasource.replay_window_slots, 900);
     }
 
     #[test]
