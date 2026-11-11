@@ -14,7 +14,7 @@ use tokio::sync::mpsc::Sender;
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    checkpoint::{CheckpointLoadOutcome, CheckpointMismatch, CheckpointStore},
+    checkpoint::{stored_genesis_hash, CheckpointLoadOutcome, CheckpointMismatch, CheckpointStore},
     monitored_addresses, unreachable_below, PollingState, RpcPollingDatasource,
 };
 use crate::{delivered::DeliveredSignatures, failover, shipped, telemetry};
@@ -22,6 +22,7 @@ use crate::{delivered::DeliveredSignatures, failover, shipped, telemetry};
 const CHECKPOINT_LOAD_ATTEMPTS: u32 = 3;
 const RECOVERY_DISABLE_AFTER_CONSECUTIVE: u32 = 3;
 const PROBE_INTERVAL: Duration = Duration::from_secs(15);
+const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug)]
 pub(super) struct HistoryUnavailable {
@@ -92,9 +93,22 @@ impl Datasource for RpcPollingDatasource {
         telemetry::initialize_rpc_polling();
 
         let mut health = vec![failover::ProbeHealth::default(); rpc_clients.len()];
+        let checkpoint_genesis_hash = stored_genesis_hash(&self.checkpoint_path).await;
         let (mut active, genesis_hash) = 'genesis: loop {
             for (index, rpc_client) in rpc_clients.iter().enumerate() {
                 match rpc_client.get_genesis_hash().await {
+                    Ok(genesis_hash)
+                        if checkpoint_genesis_hash
+                            .as_ref()
+                            .is_some_and(|expected| *expected != genesis_hash.to_string()) =>
+                    {
+                        health[index].record(false, Instant::now());
+                        log::error!(
+                            "the RPC endpoint {} serves genesis hash {genesis_hash}, not the checkpoint's {}; skipping it",
+                            labels[index],
+                            checkpoint_genesis_hash.as_deref().unwrap_or_default()
+                        );
+                    }
                     Ok(genesis_hash) => {
                         health[index].record(true, Instant::now());
                         break 'genesis (index, genesis_hash.to_string());
@@ -289,7 +303,9 @@ impl Datasource for RpcPollingDatasource {
                 .poll(&rpc_clients[active], &sender, &id, &mut state, &addresses)
                 .await;
             match &polled {
-                Ok(_) => health[active].record(true, Instant::now()),
+                Ok(outcome) => {
+                    health[active].record(outcome.transient_failures == 0, Instant::now())
+                }
                 Err(error)
                     if !error.is::<CursorAheadOfHead>() && !error.is::<HistoryUnavailable>() =>
                 {
@@ -391,7 +407,13 @@ async fn probe_standby(
             .iter()
             .enumerate()
             .filter(|(index, _)| *index != active)
-            .map(|(index, rpc_client)| async move { (index, rpc_client.get_genesis_hash().await) }),
+            .map(|(index, rpc_client)| async move {
+                let result = tokio::time::timeout(PROBE_TIMEOUT, rpc_client.get_genesis_hash())
+                    .await
+                    .map_err(|_| format!("no answer within {PROBE_TIMEOUT:?}"))
+                    .and_then(|result| result.map_err(|error| error.to_string()));
+                (index, result)
+            }),
     )
     .await;
     let now = Instant::now();
