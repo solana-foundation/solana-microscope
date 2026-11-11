@@ -55,15 +55,11 @@ pub(super) enum CheckpointLoadOutcome {
     },
 }
 
-/// Read without validation, so a missing or corrupt file yields `None` and
-/// `CheckpointStore::load` reports it.
+/// A file `CheckpointStore::load` would quarantine yields `None`, so it
+/// cannot reject endpoints and still reaches quarantine.
 pub(super) async fn stored_genesis_hash(path: &Path) -> Option<String> {
-    #[derive(Deserialize)]
-    struct Genesis {
-        genesis_hash: String,
-    }
     let raw = tokio::fs::read(path).await.ok()?;
-    serde_json::from_slice::<Genesis>(&raw)
+    serde_json::from_slice::<CheckpointDocument>(&raw)
         .ok()
         .map(|document| document.genesis_hash)
 }
@@ -457,6 +453,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(stored_genesis_hash(&path).await.as_deref(), Some("genesis"));
+
+        std::fs::write(&path, r#"{"genesis_hash":"garbled"}"#).unwrap();
+        assert_eq!(stored_genesis_hash(&path).await, None);
 
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
