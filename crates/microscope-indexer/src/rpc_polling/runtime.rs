@@ -95,6 +95,8 @@ impl Datasource for RpcPollingDatasource {
         let mut health = vec![failover::ProbeHealth::default(); rpc_clients.len()];
         let checkpoint_genesis_hash = stored_genesis_hash(&self.checkpoint_path).await;
         let (mut active, genesis_hash) = 'genesis: loop {
+            let mut mismatched = None;
+            let mut unreachable = false;
             for (index, rpc_client) in rpc_clients.iter().enumerate() {
                 match rpc_client.get_genesis_hash().await {
                     Ok(genesis_hash)
@@ -108,12 +110,14 @@ impl Datasource for RpcPollingDatasource {
                             labels[index],
                             checkpoint_genesis_hash.as_deref().unwrap_or_default()
                         );
+                        mismatched.get_or_insert((index, genesis_hash.to_string()));
                     }
                     Ok(genesis_hash) => {
                         health[index].record(true, Instant::now());
                         break 'genesis (index, genesis_hash.to_string());
                     }
                     Err(error) => {
+                        unreachable = true;
                         health[index].record(false, Instant::now());
                         telemetry::record_rpc_poll_failure();
                         log::error!(
@@ -122,6 +126,9 @@ impl Datasource for RpcPollingDatasource {
                         );
                     }
                 }
+            }
+            if let Some(mismatched) = mismatched.filter(|_| !unreachable) {
+                break 'genesis mismatched;
             }
             tokio::select! {
                 _ = cancellation_token.cancelled() => return Ok(()),
