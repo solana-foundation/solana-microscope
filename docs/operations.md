@@ -8,13 +8,18 @@ RPC plan, or your own node running the
 [`yellowstone-grpc`](https://github.com/rpcpool/yellowstone-grpc) plugin.
 Microscope speaks the upstream protocol only, so any of them work.
 `GEYSER_X_TOKEN` is the `x-token` header; leave it empty for providers that
-authenticate by URL.
+authenticate by URL. `GEYSER_FALLBACK_URLS` and `GEYSER_FALLBACK_X_TOKENS` add
+endpoints from other providers that the stream fails over to when the current
+one stops answering; see the README's datasource section.
 
 **Solana JSON-RPC (`RPC_URL`)**: required by `just backfill`, adds gap recovery
 alongside Yellowstone, and is the datasource in `mode = "rpc"`. It must serve
 `getSignaturesForAddress` and `getTransaction` back to the checkpoint, so its
 history depth caps the outage recovery can survive. Public endpoints are
-rate-limited below what continuous polling needs.
+rate-limited below what continuous polling needs. `RPC_FALLBACK_URLS` adds
+endpoints from other providers that polling fails over to; put `RPC_URL` and
+`GEYSER_URL` on different providers, or one outage takes out both the stream
+and its recovery.
 
 Endpoint cost usually exceeds the machine cost below.
 
@@ -106,7 +111,9 @@ delete the file.
 
 `microscope_rpc_recovery_degraded` carries a `reason` label: exhausted history,
 a cursor beyond the confirmed head, or a checkpoint failure. It stays off until
-restart. For exhausted history, point `RPC_URL` at an endpoint holding the
+restart. With `RPC_FALLBACK_URLS` set, an endpoint that cannot serve the
+checkpoint is only given up on, and recovery disables itself once every
+endpoint has been. For exhausted history, point `RPC_URL` at an endpoint holding the
 missing slots, or backfill the gap and remove the checkpoint. A checkpoint whose
 cluster, program, or addresses do not match the deployment disables recovery on
 purpose; fix the config or endpoint, and remove it only if the target genuinely

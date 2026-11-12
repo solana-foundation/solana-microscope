@@ -55,6 +55,15 @@ pub(super) enum CheckpointLoadOutcome {
     },
 }
 
+/// A file `CheckpointStore::load` would quarantine yields `None`, so it
+/// cannot reject endpoints and still reaches quarantine.
+pub(super) async fn stored_genesis_hash(path: &Path) -> Option<String> {
+    let raw = tokio::fs::read(path).await.ok()?;
+    serde_json::from_slice::<CheckpointDocument>(&raw)
+        .ok()
+        .map(|document| document.genesis_hash)
+}
+
 impl CheckpointStore {
     pub(super) fn new(
         path: PathBuf,
@@ -382,7 +391,7 @@ mod tests {
     use serde_json::Value;
     use solana_pubkey::Pubkey;
 
-    use super::{CheckpointLoadOutcome, CheckpointStore};
+    use super::{stored_genesis_hash, CheckpointLoadOutcome, CheckpointStore};
     use crate::{rpc_polling::signatures::AddressCursor, test_support::signature};
 
     fn checkpoint_path() -> PathBuf {
@@ -428,6 +437,25 @@ mod tests {
         };
         assert_eq!(loaded.cursors[&address].scanned_slot, 75);
         assert_eq!(loaded.recent_signatures[&transaction], 90);
+
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn reads_the_genesis_hash_before_an_endpoint_is_chosen() {
+        let path = checkpoint_path();
+        assert_eq!(stored_genesis_hash(&path).await, None);
+
+        let address = Pubkey::new_unique().to_string();
+        let cursors = BTreeMap::from([(address.clone(), AddressCursor { scanned_slot: 100 })]);
+        store(path.clone(), vec![address], 25)
+            .save_if_due(&cursors, &BTreeMap::new(), &BTreeSet::new(), true)
+            .await
+            .unwrap();
+        assert_eq!(stored_genesis_hash(&path).await.as_deref(), Some("genesis"));
+
+        std::fs::write(&path, r#"{"genesis_hash":"garbled"}"#).unwrap();
+        assert_eq!(stored_genesis_hash(&path).await, None);
 
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }

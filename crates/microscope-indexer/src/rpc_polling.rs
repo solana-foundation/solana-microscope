@@ -31,7 +31,7 @@ use self::{
 use crate::{
     backfill::{self, FetchError},
     delivered::DeliveredSignatures,
-    shipped, telemetry,
+    failover, shipped, telemetry,
 };
 
 const CONCURRENT_TRANSACTION_FETCHES: usize = 5;
@@ -40,9 +40,15 @@ const HISTORY_BOUNDARY_CHECK_INTERVAL: Duration = Duration::from_secs(60);
 const STATE_FILE_NAME: &str = "rpc-polling.json";
 const SHIPPED_JOURNAL_FILE_NAME: &str = "shipped.log";
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RpcEndpoint {
+    url: String,
+    label: String,
+}
+
 #[derive(Debug)]
 pub struct RpcPollingDatasource {
-    rpc_url: String,
+    endpoints: Vec<RpcEndpoint>,
     program_id: Pubkey,
     multisig_state_address: Option<Pubkey>,
     poll_interval: Duration,
@@ -59,17 +65,30 @@ impl RpcPollingDatasource {
         replay_window_slots: u64,
         delivered: Option<DeliveredSignatures>,
     ) -> Option<Self> {
-        let rpc_url = env::var("RPC_URL").ok().filter(|url| !url.is_empty())?;
-        if !valid_rpc_url(&rpc_url) {
-            panic!("RPC_URL must be a valid HTTP(S) URL");
-        }
+        let fallback_urls = env::var("RPC_FALLBACK_URLS").ok();
+        let Some(rpc_url) = env::var("RPC_URL").ok().filter(|url| !url.is_empty()) else {
+            if fallback_urls.is_some_and(|urls| !urls.trim().is_empty()) {
+                panic!("RPC_FALLBACK_URLS is set but RPC_URL is not; set RPC_URL to the primary endpoint");
+            }
+            return None;
+        };
+        let endpoints = rpc_endpoints(&rpc_url, fallback_urls.as_deref())
+            .unwrap_or_else(|error| panic!("{error}"));
+        log::info!(
+            "RPC endpoints in priority order: {}",
+            endpoints
+                .iter()
+                .map(|endpoint| endpoint.label.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
         let state_dir = env::var_os("MICROSCOPE_STATE_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(".microscope-state"));
         shipped::install(state_dir.join(SHIPPED_JOURNAL_FILE_NAME));
 
         Some(Self {
-            rpc_url,
+            endpoints,
             program_id,
             multisig_state_address,
             poll_interval,
@@ -259,6 +278,7 @@ impl RpcPollingDatasource {
 
         let mut successful_updates = Vec::with_capacity(fetched.len());
         let mut retrying_signatures = HashSet::new();
+        let mut transient_failures = HashSet::new();
         for (signature, fetched_transaction) in fetched {
             match process_fetched_transaction(state, signature, fetched_transaction) {
                 TransactionPollOutcome::Ready { slot, update } => {
@@ -268,6 +288,7 @@ impl RpcPollingDatasource {
                     let context = &signature_contexts[&signature];
                     telemetry::record_rpc_transaction_failure();
                     retrying_signatures.insert(signature);
+                    transient_failures.insert(signature);
                     log::warn!(
                         "RPC transaction {signature} at slot {} failed a transient fetch; cursors for {} remain unchanged until it succeeds: {error:#}",
                         context.slot,
@@ -352,6 +373,7 @@ impl RpcPollingDatasource {
         );
         Ok(PollOutcome {
             queued_transactions,
+            transient_failures,
             checkpoint_urgent: initialized || advanced_with_activity,
             history_boundary_verified,
         })
@@ -411,14 +433,19 @@ fn signatures_to_fetch(
 #[derive(Debug)]
 struct PollOutcome {
     queued_transactions: usize,
+    transient_failures: HashSet<Signature>,
     checkpoint_urgent: bool,
     history_boundary_verified: bool,
 }
 
-fn valid_rpc_url(value: &str) -> bool {
-    reqwest::Url::parse(value)
-        .ok()
-        .is_some_and(|url| matches!(url.scheme(), "http" | "https"))
+fn rpc_endpoints(url: &str, fallback_urls: Option<&str>) -> Result<Vec<RpcEndpoint>, String> {
+    Ok(failover::endpoints("RPC", url, fallback_urls)?
+        .into_iter()
+        .map(|(url, label)| RpcEndpoint {
+            url: url.to_string(),
+            label,
+        })
+        .collect())
 }
 
 enum TransactionPollOutcome {
@@ -483,8 +510,8 @@ mod tests {
     use solana_commitment_config::CommitmentConfig;
 
     use super::{
-        advance_ready_cursors, cursor_ahead_of_head, process_fetched_transaction, signatures,
-        signatures_to_fetch, valid_rpc_url, AddressCursor, DeliveredSignatures, PollingState,
+        advance_ready_cursors, cursor_ahead_of_head, process_fetched_transaction, rpc_endpoints,
+        signatures, signatures_to_fetch, AddressCursor, DeliveredSignatures, PollingState,
         RpcClient, RpcPollingDatasource, TransactionPollOutcome,
     };
     use crate::{
@@ -495,10 +522,49 @@ mod tests {
 
     #[test]
     fn accepts_only_http_rpc_urls() {
-        assert!(valid_rpc_url("https://rpc.example.com"));
-        assert!(valid_rpc_url("http://127.0.0.1:8899"));
-        assert!(!valid_rpc_url("rpc.example.com"));
-        assert!(!valid_rpc_url("ftp://rpc.example.com"));
+        assert!(rpc_endpoints("https://rpc.example.com", None).is_ok());
+        assert!(rpc_endpoints("http://127.0.0.1:8899", None).is_ok());
+        assert!(rpc_endpoints("rpc.example.com", None).is_err());
+        assert!(rpc_endpoints("ftp://rpc.example.com", None).is_err());
+    }
+
+    #[test]
+    fn polls_the_main_endpoint_first_and_the_fallbacks_in_order() {
+        let endpoints = rpc_endpoints(
+            "https://mainnet.helius-rpc.com/?api-key=secret",
+            Some("https://example.quiknode.pro/secret/, https://rpc.example.com:8899"),
+        )
+        .unwrap();
+
+        let labels = endpoints
+            .iter()
+            .map(|endpoint| endpoint.label.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            labels,
+            [
+                "mainnet.helius-rpc.com",
+                "example.quiknode.pro",
+                "rpc.example.com:8899"
+            ]
+        );
+        assert_eq!(endpoints[1].url, "https://example.quiknode.pro/secret/");
+        assert_eq!(
+            rpc_endpoints("https://rpc.example.com", Some(""))
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn rejects_a_non_http_fallback_and_a_repeated_host() {
+        assert!(rpc_endpoints("https://rpc.example.com", Some("rpc.other.com")).is_err());
+        assert!(rpc_endpoints(
+            "https://rpc.example.com/?api-key=a",
+            Some("https://rpc.example.com/?api-key=b")
+        )
+        .is_err());
     }
 
     #[test]
@@ -554,7 +620,7 @@ mod tests {
 
     fn polling_datasource(delivered: Option<DeliveredSignatures>) -> RpcPollingDatasource {
         RpcPollingDatasource {
-            rpc_url: "https://rpc.example.com".to_string(),
+            endpoints: rpc_endpoints("https://rpc.example.com", None).unwrap(),
             program_id: Pubkey::new_unique(),
             multisig_state_address: None,
             poll_interval: Duration::from_secs(5),
