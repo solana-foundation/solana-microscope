@@ -406,7 +406,8 @@ version = "v3"
 ```
 
 A `kind = "multisig"` alert then fires for activity on any configured vault,
-and its name only has to be emitted by one of the configured versions. Records
+names that vault in its `vault_address` annotation, and its name only has to be
+emitted by one of the configured versions. Records
 carry their own `vault_address`, so narrow an alert to one multisig with a
 condition on it:
 

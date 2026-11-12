@@ -14,7 +14,7 @@ An activity alert cannot be interpreted without the config that produced it.
 
 ## What fired
 
-The `transaction` annotation carries the signature and an explorer link, and `signature` is a query label. Pull the record itself from Loki rather than reasoning from the alert text: the alert only proves a match, the record has the decoded `data`.
+The `transaction` annotation carries the signature and an explorer link, and `signature` is a query label. A multisig alert also carries the matched vault in its `vault_address` annotation (query label `scope`). Pull the record itself from Loki rather than reasoning from the alert text: the alert only proves a match, the record has the decoded `data`.
 
 `references/investigate.md` has the record shapes and the query transports. For an instruction alert, the record is `kind = "program_instruction"` with the matching `name` and `signature`.
 
@@ -56,6 +56,8 @@ sum by (signature) (count_over_time({service_name="microscope-indexer"}
   | kind = "<record kind>" | signal = "<alert name>" | scope = "<configured address>"
   | (<condition filters>) | __error__ = "" [<lookback>s]))
 ```
+
+Multisig alerts group by `(signature, scope)`, and with several multisigs the scope filter is `scope =~ "<vault>|<vault>"`.
 
 The causes, in the order they are worth checking:
 

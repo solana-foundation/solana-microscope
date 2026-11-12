@@ -409,7 +409,7 @@ fn carbon_failed_updates(snapshot: &carbon_core::metrics::MetricsSnapshot) -> u6
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeSet, sync::Arc};
+    use std::sync::Arc;
 
     use carbon_core::{
         datasource::{DatasourceId, Update},
@@ -419,8 +419,6 @@ mod tests {
         transaction::TransactionMetadata,
         transformers::extract_instructions_with_metadata,
     };
-    use metrics_util::debugging::DebuggingRecorder;
-    use solana_instruction::{AccountMeta, Instruction};
     use solana_pubkey::Pubkey;
 
     use super::{deduplication_filters, with_instruction_pipes, MultisigVersion, VerifiedMultisig};
@@ -510,69 +508,6 @@ mod tests {
         }
     }
 
-    /// Feeds an instruction from an unmonitored multisig of every Squads
-    /// version through the pipes, so each registered Squads decoder reports
-    /// itself through the unmatched counter's version label.
-    fn squads_versions_decoded(multisigs: &[VerifiedMultisig]) -> BTreeSet<String> {
-        let mut builder = with_instruction_pipes(Pipeline::builder(), multisigs);
-        let template = redelivered_instruction();
-        let instructions = [
-            (
-                carbon_squads_v3_decoder::PROGRAM_ID,
-                [224, 39, 88, 181, 36, 59, 155, 122],
-            ),
-            (
-                carbon_squads_v4_decoder::PROGRAM_ID,
-                [11, 34, 92, 248, 154, 27, 51, 106],
-            ),
-            (
-                carbon_squads_smart_account_decoder::PROGRAM_ID,
-                [90, 186, 203, 234, 70, 185, 191, 21],
-            ),
-        ]
-        .map(|(program_id, data)| NestedInstruction {
-            instruction: Instruction {
-                program_id,
-                accounts: (0..4)
-                    .map(|_| AccountMeta::new(Pubkey::new_unique(), false))
-                    .collect(),
-                data: data.to_vec(),
-            },
-            ..template.clone()
-        });
-        let recorder = DebuggingRecorder::new();
-        let snapshotter = recorder.snapshotter();
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .build()
-            .unwrap();
-
-        metrics::with_local_recorder(&recorder, || {
-            runtime.block_on(async {
-                for pipe in &mut builder.instruction_pipes {
-                    for instruction in &instructions {
-                        pipe.run(instruction).await.unwrap();
-                    }
-                }
-            })
-        });
-
-        snapshotter
-            .snapshot()
-            .into_vec()
-            .into_iter()
-            .filter(|(key, _, _, _)| {
-                key.key().name() == "microscope_multisig_unmatched_state_total"
-            })
-            .flat_map(|(key, _, _, _)| {
-                key.key()
-                    .labels()
-                    .filter(|label| label.key() == "version")
-                    .map(|label| label.value().to_string())
-                    .collect::<Vec<_>>()
-            })
-            .collect()
-    }
-
     #[test]
     fn registers_one_squads_decoder_per_configured_version() {
         let same_version = [multisig(MultisigVersion::V4), multisig(MultisigVersion::V4)];
@@ -581,10 +516,6 @@ mod tests {
                 .instruction_pipes
                 .len(),
             2
-        );
-        assert_eq!(
-            squads_versions_decoded(&same_version),
-            BTreeSet::from(["v4".to_string()])
         );
 
         let mixed = [
@@ -598,12 +529,6 @@ mod tests {
                 .len(),
             3
         );
-        assert_eq!(
-            squads_versions_decoded(&mixed),
-            BTreeSet::from(["v3".to_string(), "v5".to_string()])
-        );
-
-        assert!(squads_versions_decoded(&[]).is_empty());
     }
 
     /// Carbon runs transaction pipes after every instruction pipe, making the

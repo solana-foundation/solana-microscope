@@ -220,22 +220,30 @@ fn transaction_filters(
     program_id: &str,
     multisig_state_addresses: &[Pubkey],
 ) -> HashMap<String, SubscribeRequestFilterTransactions> {
-    let requiring = |address: String| SubscribeRequestFilterTransactions {
+    let filter = |account_include, account_required| SubscribeRequestFilterTransactions {
         vote: Some(false),
         failed: None,
         signature: None,
-        account_include: vec![],
+        account_include,
         account_exclude: vec![],
-        account_required: vec![address],
+        account_required,
         cuckoo_account_include: None,
         token_accounts: None,
     };
-    let mut transaction_filters =
-        HashMap::from([("program".to_string(), requiring(program_id.to_string()))]);
-    for state_address in multisig_state_addresses {
+    let mut transaction_filters = HashMap::from([(
+        "program".to_string(),
+        filter(vec![], vec![program_id.to_string()]),
+    )]);
+    if !multisig_state_addresses.is_empty() {
         transaction_filters.insert(
-            format!("multisig_state_{state_address}"),
-            requiring(state_address.to_string()),
+            "multisig_state".to_string(),
+            filter(
+                multisig_state_addresses
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect(),
+                vec![],
+            ),
         );
     }
     transaction_filters
@@ -504,31 +512,26 @@ mod tests {
         assert_eq!(filters.len(), 2);
         assert_eq!(filters["program"].account_required, ["program"]);
         assert_eq!(
-            filters[&format!("multisig_state_{state}")].account_required,
+            filters["multisig_state"].account_include,
             [state.to_string()]
         );
         assert!(!filters.contains_key("multisig_vault"));
         assert!(filters.keys().all(|name| !name.starts_with("squads_")));
     }
 
-    /// Filters are ORed while one filter's required accounts are ANDed, so
-    /// every state account needs a filter of its own.
+    /// Required accounts are ANDed and included ones ORed, so the state
+    /// accounts share one include list and the filter count stays at two.
     #[test]
-    fn subscribes_to_every_multisig_state_account_separately() {
+    fn subscribes_to_every_multisig_state_account_in_one_filter() {
         let states = [Pubkey::new_unique(), Pubkey::new_unique()];
         let filters = transaction_filters("program", &states);
 
-        let mut required = filters
-            .values()
-            .map(|filter| filter.account_required.clone())
-            .collect::<Vec<_>>();
-        required.sort();
-        let mut expected = vec![
-            vec!["program".to_string()],
-            vec![states[0].to_string()],
-            vec![states[1].to_string()],
-        ];
-        expected.sort();
-        assert_eq!(required, expected);
+        assert_eq!(filters.len(), 2);
+        assert_eq!(filters["program"].account_required, ["program"]);
+        assert_eq!(
+            filters["multisig_state"].account_include,
+            states.map(|state| state.to_string())
+        );
+        assert!(filters["multisig_state"].account_required.is_empty());
     }
 }

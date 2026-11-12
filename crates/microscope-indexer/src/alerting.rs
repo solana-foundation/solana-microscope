@@ -429,7 +429,7 @@ fn multisig_health_rules(
                 "error",
                 "multisig_unmatched_state",
                 channel,
-                "Squads instructions decoded but referenced a different internal state account than the configured one, so no multisig activity was recorded for the configured vault. The multisig.state_address or multisig.version is wrong for this vault. Without this alert a misconfigured vault is indistinguishable from an idle one: both leave the multisig panels empty.",
+                "Squads instructions decoded but referenced an internal state account that is not configured, so no multisig activity was recorded for them. A configured multisig.state_address or multisig.version is wrong. Without this alert a misconfigured vault is indistinguishable from an idle one: both leave the multisig panels empty.",
                             pending_seconds,
             )
         })
@@ -739,6 +739,9 @@ fn grafana_rule(
         "transaction": format!("{{{{ $labels.signature }}}} {transaction_url}"),
     });
     // Grafana rejects a rule carrying one of these two without the other.
+    if alert.kind == AlertKind::Multisig {
+        annotations["vault_address"] = json!("{{ $labels.scope }}");
+    }
     if let Some(panel_id) = log_panel_id(alert.kind) {
         annotations["__dashboardUid__"] = json!(dashboard::OVERVIEW_UID);
         annotations["__panelId__"] = json!(panel_id.to_string());
@@ -816,6 +819,11 @@ fn logql_query(config: &Config, alert: &AlertRule) -> anyhow::Result<String> {
     let quoted_name = serde_json::to_string(&alert.name)?;
     let scope_filter = dashboard::scope_filter(&scope_values);
 
+    let grouping = if alert.kind == AlertKind::Multisig {
+        "signature, scope"
+    } else {
+        "signature"
+    };
     let mut parser = format!(
         "| json kind=\"kind\", signal=\"{signal_path}\", scope=\"{scope_path}\", signature=\"signature\""
     );
@@ -845,7 +853,7 @@ fn logql_query(config: &Config, alert: &AlertRule) -> anyhow::Result<String> {
         }
 
         Ok(format!(
-            "sum by (signature) (count_over_time({{service_name=\"microscope-indexer\"}} {parser} {filters} | __error__ = \"\" [{lookback_window_seconds}s]))"
+            "sum by ({grouping}) (count_over_time({{service_name=\"microscope-indexer\"}} {parser} {filters} | __error__ = \"\" [{lookback_window_seconds}s]))"
         ))
     };
 
@@ -1432,6 +1440,12 @@ mod tests {
             "| scope =~ \"11111111111111111111111111111111|SysvarC1ock11111111111111111111111111111111\""
         ));
         assert!(!query.contains("| scope = "));
+        assert!(query.contains("sum by (signature, scope) (count_over_time("));
+        assert_eq!(
+            grafana_rule(&several, &rule, Some(AlertChannel::Slack)).unwrap()["annotations"]
+                ["vault_address"],
+            "{{ $labels.scope }}"
+        );
         assert_eq!(
             grafana_rule(&several, &rule, Some(AlertChannel::Slack)).unwrap()["uid"],
             grafana_rule(&single, &rule, Some(AlertChannel::Slack)).unwrap()["uid"],

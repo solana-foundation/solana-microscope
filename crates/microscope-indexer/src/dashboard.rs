@@ -77,7 +77,7 @@ fn overview_document(config: &Config, rpc_polling: bool) -> anyhow::Result<Value
                     .map(|multisig| multisig.vault_address.as_str())
                     .collect::<Vec<_>>(),
             ),
-            "Squads multisig activity for the configured vault. Missing configured fields display as a placeholder.",
+            "Squads multisig activity for every configured vault. Missing configured fields display as a placeholder.",
         );
     }
 
