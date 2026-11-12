@@ -39,10 +39,7 @@ const RECONNECT_MAX_RETRIES: u32 = 5;
 /// the reconnect budget rather than cut it short.
 const STREAM_TIMEOUT: Duration = Duration::from_secs(120);
 
-pub fn yellowstone(
-    program_id: &str,
-    multisig_state_addresses: &[Pubkey],
-) -> YellowstoneGrpcGeyserClient {
+pub fn yellowstone(monitored_addresses: &[Pubkey]) -> YellowstoneGrpcGeyserClient {
     let geyser_url = env::var("GEYSER_URL").unwrap_or_default();
     if geyser_url.is_empty() {
         panic!("GEYSER_URL env var must be set to a Yellowstone gRPC endpoint");
@@ -55,7 +52,7 @@ pub fn yellowstone(
     telemetry::initialize_yellowstone_probe();
     tokio::spawn(probe_endpoint(geyser_url.clone(), x_token.clone()));
 
-    client(geyser_url, x_token, program_id, multisig_state_addresses)
+    client(geyser_url, x_token, monitored_addresses)
 }
 
 /// How long the endpoint may fail the probe continuously before `/readyz`
@@ -111,8 +108,7 @@ async fn probe_get_version(geyser_url: &str, x_token: Option<String>) -> Result<
 fn client(
     geyser_url: String,
     x_token: Option<String>,
-    program_id: &str,
-    multisig_state_addresses: &[Pubkey],
+    monitored_addresses: &[Pubkey],
 ) -> YellowstoneGrpcGeyserClient {
     let (disconnections, notifications) = mpsc::channel(DISCONNECT_NOTIFICATION_BUFFER);
     telemetry::initialize_yellowstone();
@@ -126,7 +122,7 @@ fn client(
         x_token,
         Some(CommitmentLevel::Confirmed),
         HashMap::new(),
-        transaction_filters(program_id, multisig_state_addresses),
+        transaction_filters(monitored_addresses),
         Default::default(),
         YellowstoneGrpcClientConfig::default().with_reconnect(reconnect()),
         Some(disconnections),
@@ -216,37 +212,27 @@ async fn record_disconnections(
     }
 }
 
+/// Included accounts are ORed, so every monitored address shares one filter
+/// and the subscription stays within endpoints that allow a single one.
 fn transaction_filters(
-    program_id: &str,
-    multisig_state_addresses: &[Pubkey],
+    monitored_addresses: &[Pubkey],
 ) -> HashMap<String, SubscribeRequestFilterTransactions> {
-    let filter = |account_include, account_required| SubscribeRequestFilterTransactions {
-        vote: Some(false),
-        failed: None,
-        signature: None,
-        account_include,
-        account_exclude: vec![],
-        account_required,
-        cuckoo_account_include: None,
-        token_accounts: None,
-    };
-    let mut transaction_filters = HashMap::from([(
-        "program".to_string(),
-        filter(vec![], vec![program_id.to_string()]),
-    )]);
-    if !multisig_state_addresses.is_empty() {
-        transaction_filters.insert(
-            "multisig_state".to_string(),
-            filter(
-                multisig_state_addresses
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect(),
-                vec![],
-            ),
-        );
-    }
-    transaction_filters
+    HashMap::from([(
+        "monitored".to_string(),
+        SubscribeRequestFilterTransactions {
+            vote: Some(false),
+            failed: None,
+            signature: None,
+            account_include: monitored_addresses
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+            account_exclude: vec![],
+            account_required: vec![],
+            cuckoo_account_include: None,
+            token_accounts: None,
+        },
+    )])
 }
 
 #[cfg(test)]
@@ -351,14 +337,14 @@ mod tests {
 
     #[tokio::test]
     async fn subscribes_with_a_notifier_so_gaps_are_not_silent() {
-        let client = client("http://localhost:10000".to_string(), None, "program", &[]);
+        let client = client("http://localhost:10000".to_string(), None, &[]);
 
         assert!(client.disconnect_notifier.is_some());
     }
 
     #[tokio::test]
     async fn recovers_a_disconnect_by_replaying_it_rather_than_resuming_at_the_head() {
-        let client = client("http://localhost:10000".to_string(), None, "program", &[]);
+        let client = client("http://localhost:10000".to_string(), None, &[]);
 
         let configured = client
             .geyser_config
@@ -497,41 +483,15 @@ mod tests {
     }
 
     #[test]
-    fn subscribes_to_the_program_only_without_a_multisig() {
-        let filters = transaction_filters("program", &[]);
+    fn subscribes_to_every_monitored_address_in_one_filter() {
+        let addresses = [Pubkey::new_unique(), Pubkey::new_unique()];
+        let filters = transaction_filters(&addresses);
 
         assert_eq!(filters.len(), 1);
-        assert_eq!(filters["program"].account_required, ["program"]);
-    }
-
-    #[test]
-    fn subscribes_to_the_multisig_state_account_and_not_the_vault() {
-        let state = Pubkey::new_unique();
-        let filters = transaction_filters("program", &[state]);
-
-        assert_eq!(filters.len(), 2);
-        assert_eq!(filters["program"].account_required, ["program"]);
         assert_eq!(
-            filters["multisig_state"].account_include,
-            [state.to_string()]
+            filters["monitored"].account_include,
+            addresses.map(|address| address.to_string())
         );
-        assert!(!filters.contains_key("multisig_vault"));
-        assert!(filters.keys().all(|name| !name.starts_with("squads_")));
-    }
-
-    /// Required accounts are ANDed and included ones ORed, so the state
-    /// accounts share one include list and the filter count stays at two.
-    #[test]
-    fn subscribes_to_every_multisig_state_account_in_one_filter() {
-        let states = [Pubkey::new_unique(), Pubkey::new_unique()];
-        let filters = transaction_filters("program", &states);
-
-        assert_eq!(filters.len(), 2);
-        assert_eq!(filters["program"].account_required, ["program"]);
-        assert_eq!(
-            filters["multisig_state"].account_include,
-            states.map(|state| state.to_string())
-        );
-        assert!(filters["multisig_state"].account_required.is_empty());
+        assert!(filters["monitored"].account_required.is_empty());
     }
 }

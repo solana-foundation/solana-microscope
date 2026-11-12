@@ -43,8 +43,10 @@ infra-check:
     terraform fmt -check -recursive infra
     TF_DATA_DIR=.terraform-check terraform -chdir=infra/aws init -backend=false -input=false
     TF_DATA_DIR=.terraform-check terraform -chdir=infra/aws validate
+    TF_DATA_DIR=.terraform-check terraform -chdir=infra/aws test
     TF_DATA_DIR=.terraform-check terraform -chdir=infra/gcp init -backend=false -input=false
     TF_DATA_DIR=.terraform-check terraform -chdir=infra/gcp validate
+    TF_DATA_DIR=.terraform-check terraform -chdir=infra/gcp test
     bash -n infra/deploy-microscope.sh
     bash -n infra/tests/reconciler-test.sh
     infra/tests/reconciler-test.sh

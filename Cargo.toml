@@ -4,7 +4,7 @@ resolver = "2"
 # which keeps fmt/clippy off generated code.
 members = ["crates/microscope-indexer"]
 exclude = [
-    "crates/program-decoder",
+    "crates/programs",
     "crates/squads-v3-decoder",
     "crates/squads-v4-decoder",
     "crates/squads-smart-account-decoder",

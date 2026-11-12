@@ -3,11 +3,7 @@ use std::str::FromStr;
 use solana_signature::Signature;
 use solana_transaction_status::EncodedConfirmedTransactionWithStatusMeta;
 
-use crate::config::{
-    AlertingConfig, Config, DashboardConfig, DatasourceConfig, MultisigConfig, MultisigVersion,
-};
-
-const SYSTEM_PROGRAM: &str = "11111111111111111111111111111111";
+use crate::config::Config;
 
 pub fn signature(value: u64) -> Signature {
     let mut bytes = [0; 64];
@@ -16,19 +12,18 @@ pub fn signature(value: u64) -> Signature {
 }
 
 pub fn config() -> Config {
-    Config {
-        program_id: SYSTEM_PROGRAM.to_string(),
-        idl_path: "Cargo.toml".to_string(),
-        multisigs: vec![MultisigConfig {
-            vault_address: SYSTEM_PROGRAM.to_string(),
-            state_address: SYSTEM_PROGRAM.to_string(),
-            version: MultisigVersion::V4,
-        }],
-        datasource: DatasourceConfig::default(),
-        alerting: AlertingConfig::default(),
-        dashboard: DashboardConfig::default(),
-        alert_rules: vec![],
-    }
+    Config::parse(
+        r#"
+program_id = "11111111111111111111111111111111"
+idl_path = "Cargo.toml"
+
+[multisig]
+vault_address = "11111111111111111111111111111111"
+state_address = "11111111111111111111111111111111"
+version = "v4"
+"#,
+    )
+    .expect("test config parses")
 }
 
 pub fn squads_v4_vault_execute() -> (Signature, EncodedConfirmedTransactionWithStatusMeta) {

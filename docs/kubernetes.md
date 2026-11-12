@@ -14,8 +14,8 @@ the manifests cover what that means in practice.
 
 - A published image. The VM deployment builds on the VM; Kubernetes pulls, so
   run the `Publish Docker Image` workflow from your fork first. See
-  [Prebuilt container images](../README.md#prebuilt-container-images). One image
-  serves one program and one IDL.
+  [Prebuilt container images](../README.md#prebuilt-container-images). An image
+  serves only the programs and IDLs it was built from.
 - Prometheus, Loki, and Grafana you already operate, or a Grafana Cloud stack.
   These manifests deploy none of them.
 

@@ -191,8 +191,8 @@ to match, merge, then push the tag. The `Release` workflow rejects a tag whose
 version does not match the crate or has no changelog section, and publishes the
 section as the release notes.
 
-Releases do not publish a container image: one image serves one program and one
-IDL, so operators build or publish their own.
+Releases do not publish a container image: an image serves only the programs
+and IDLs it was built from, so operators build or publish their own.
 
 ## License
 

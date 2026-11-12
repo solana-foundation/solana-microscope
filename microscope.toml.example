@@ -1,7 +1,10 @@
 # Copy to microscope.toml and edit for your deployment (`just setup` seeds it).
-# One deployment monitors one program; the values below are the test deployment.
+# The values below are the test deployment.
 program_id = "De1egAFMkMWZSN5rYXRj9CAdheBamobVNubTsi9avR44"
 idl_path = "idl/idl1.json"
+# To monitor several programs, replace the two keys above with one [[programs]]
+# table per program, each with its own program_id and idl_path. In a TOML file
+# those tables go after every top-level key.
 # Optional. Configure the Squads default vault, internal state account, and
 # generation. Omit this section to monitor the program only.
 # [multisig]

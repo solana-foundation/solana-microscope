@@ -13,7 +13,7 @@ target/
 .env.*
 node_modules/
 # Regenerated inside the builder stage.
-crates/program-decoder/
+crates/programs/
 crates/squads-v3-decoder/
 crates/squads-v4-decoder/
 crates/squads-smart-account-decoder/

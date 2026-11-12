@@ -4,7 +4,20 @@ locals {
     ManagedBy   = "terraform"
   }
 
-  idl_file = "${path.module}/${var.idl_path}"
+  programs = length(var.programs) > 0 ? var.programs : [
+    { program_id = var.program_id, idl_path = var.idl_path }
+  ]
+  idl_files = [for program in local.programs : "${path.module}/${program.idl_path}"]
+  # The first program keeps the object name a single-program deployment uses,
+  # and the reconciler installs every object under idl/ by this same name.
+  idl_objects = [
+    for index in range(length(local.programs)) :
+    index == 0 ? "program.json" : "program-${index}.json"
+  ]
+  extra_idls = [
+    for index in range(1, length(local.programs)) :
+    { object = local.idl_objects[index], sha256 = filesha256(local.idl_files[index]) }
+  ]
   alert_channels = toset(flatten([
     for alert in var.alerts : tolist(alert.channels)
   ]))
@@ -14,6 +27,10 @@ locals {
   ]
   microscope_config = templatefile("${path.module}/../microscope.toml.tftpl", {
     program_id = var.program_id
+    programs = [
+      for index, program in var.programs :
+      { program_id = program.program_id, idl_path = "idl/${local.idl_objects[index]}" }
+    ]
     multisig   = var.multisig
     multisigs  = var.multisigs
     datasource = var.datasource
@@ -22,17 +39,17 @@ locals {
     alerts     = var.alerts
   })
   deployment_config_key   = "microscope.toml"
-  deployment_idl_key      = "program.json"
+  deployment_idl_key      = local.idl_objects[0]
   deployment_manifest_key = "deployment.json"
-  deployment_revision_inputs = {
+  deployment_revision_inputs = merge({
     config_sha256  = sha256(local.microscope_config)
-    idl_sha256     = filesha256(local.idl_file)
+    idl_sha256     = filesha256(local.idl_files[0])
     repository_ref = var.repository_ref
     repository_url = var.repository_url
     secret_version = tostring(aws_secretsmanager_secret_version.runtime.version_id)
-  }
+  }, length(local.extra_idls) > 0 ? { extra_idls = local.extra_idls } : {})
   deployment_revision = sha256(jsonencode(local.deployment_revision_inputs))
-  deployment_manifest = jsonencode({
+  deployment_manifest = jsonencode(merge({
     schema_version = 1
     revision       = local.deployment_revision
     repository_url = var.repository_url
@@ -40,9 +57,9 @@ locals {
     config_object  = local.deployment_config_key
     config_sha256  = sha256(local.microscope_config)
     idl_object     = local.deployment_idl_key
-    idl_sha256     = filesha256(local.idl_file)
+    idl_sha256     = filesha256(local.idl_files[0])
     secret_version = tostring(aws_secretsmanager_secret_version.runtime.version_id)
-  })
+  }, length(local.extra_idls) > 0 ? { extra_idls = local.extra_idls } : {}))
   user_data = templatefile("${path.module}/cloud-init.yaml.tftpl", {
     cloud_provider_b64      = base64encode("aws")
     deployment_bucket_b64   = base64encode(aws_s3_bucket.idl.bucket)
@@ -154,10 +171,12 @@ resource "aws_s3_bucket_versioning" "idl" {
 }
 
 resource "aws_s3_object" "idl" {
+  count = length(local.programs)
+
   bucket                 = aws_s3_bucket.idl.id
-  key                    = local.deployment_idl_key
-  source                 = local.idl_file
-  etag                   = filemd5(local.idl_file)
+  key                    = local.idl_objects[count.index]
+  source                 = local.idl_files[count.index]
+  etag                   = filemd5(local.idl_files[count.index])
   server_side_encryption = "AES256"
   content_type           = "application/json"
 
@@ -303,7 +322,9 @@ resource "aws_instance" "this" {
   associate_public_ip_address = true
   vpc_security_group_ids      = [aws_security_group.instance.id]
   iam_instance_profile        = aws_iam_instance_profile.instance.name
-  user_data                   = local.user_data
+  # EC2 caps user data at 16 KB before base64 and the embedded reconciler
+  # alone exceeds that; cloud-init decompresses gzip itself.
+  user_data_base64            = base64gzip(local.user_data)
   user_data_replace_on_change = true
 
   # IMDSv2 with a single hop denies containers the instance role credentials;
@@ -348,6 +369,20 @@ resource "aws_instance" "this" {
     precondition {
       condition     = var.multisig == null || length(var.multisigs) == 0
       error_message = "Set multisig or multisigs, not both."
+    }
+    precondition {
+      condition     = (var.program_id != null) != (length(var.programs) > 0)
+      error_message = "Set exactly one of program_id and programs."
+    }
+    precondition {
+      condition = alltrue([
+        for alert in var.alerts :
+        alert.program_id == null ? true : (
+          alert.kind != "multisig" &&
+          contains([for program in local.programs : program.program_id], alert.program_id)
+        )
+      ])
+      error_message = "An alert's program_id must name a configured program, and applies to event and instruction alerts only."
     }
   }
 
