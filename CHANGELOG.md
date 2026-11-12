@@ -8,6 +8,15 @@ version and the section heading below.
 
 ## [Unreleased]
 
+### Added
+
+- One deployment can monitor several Squads multisigs, of mixed versions. Write
+  one `[[multisig]]` table per multisig in `microscope.toml`, or set the new
+  `multisigs` Terraform list instead of `multisig`. Existing single-multisig
+  configs load unchanged and generate the same alert rules and dashboard.
+  Multisig alerts cover every configured vault; a `vault_address` condition
+  narrows one to a single multisig.
+
 ### Fixed
 
 - Event, instruction and multisig alerts on Slack and Telegram no longer send

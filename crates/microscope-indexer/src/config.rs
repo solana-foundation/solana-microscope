@@ -7,7 +7,13 @@ use std::{
 
 use anyhow::{bail, Context};
 use heck::ToSnakeCase;
-use serde::{Deserialize, Serialize};
+use serde::{
+    de::{
+        value::{MapAccessDeserializer, SeqAccessDeserializer},
+        MapAccess, SeqAccess, Visitor,
+    },
+    Deserialize, Deserializer, Serialize,
+};
 use solana_pubkey::Pubkey;
 
 use crate::{alerting::RPC_POLL_FAILURE_WINDOW_SECONDS, multisig::action_names};
@@ -290,6 +296,42 @@ pub struct MultisigConfig {
     pub version: MultisigVersion,
 }
 
+impl MultisigConfig {
+    pub fn vault_pubkey(&self) -> Pubkey {
+        Pubkey::from_str(&self.vault_address)
+            .expect("multisig.vault_address is validated while loading config")
+    }
+
+    pub fn state_pubkey(&self) -> Pubkey {
+        Pubkey::from_str(&self.state_address)
+            .expect("multisig.state_address is validated while loading config")
+    }
+}
+
+fn one_or_many_multisigs<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<MultisigConfig>, D::Error> {
+    struct OneOrMany;
+
+    impl<'de> Visitor<'de> for OneOrMany {
+        type Value = Vec<MultisigConfig>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("a [multisig] table or [[multisig]] array of tables")
+        }
+
+        fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
+            MultisigConfig::deserialize(MapAccessDeserializer::new(map)).map(|one| vec![one])
+        }
+
+        fn visit_seq<A: SeqAccess<'de>>(self, seq: A) -> Result<Self::Value, A::Error> {
+            Vec::deserialize(SeqAccessDeserializer::new(seq))
+        }
+    }
+
+    deserializer.deserialize_any(OneOrMany)
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DatasourceMode {
@@ -349,7 +391,12 @@ impl DatasourceConfig {
 pub struct Config {
     pub program_id: String,
     pub idl_path: String,
-    pub multisig: Option<MultisigConfig>,
+    #[serde(
+        default,
+        rename = "multisig",
+        deserialize_with = "one_or_many_multisigs"
+    )]
+    pub multisigs: Vec<MultisigConfig>,
     #[serde(default)]
     pub datasource: DatasourceConfig,
     #[serde(default)]
@@ -380,13 +427,21 @@ impl Config {
     fn validate(&self, config_path: &Path) -> anyhow::Result<()> {
         Pubkey::from_str(&self.program_id)
             .with_context(|| format!("invalid program_id {}", self.program_id))?;
-        if let Some(multisig) = &self.multisig {
-            Pubkey::from_str(&multisig.vault_address).with_context(|| {
+        let mut vault_addresses = BTreeSet::new();
+        let mut state_addresses = BTreeSet::new();
+        for multisig in &self.multisigs {
+            let vault_address = Pubkey::from_str(&multisig.vault_address).with_context(|| {
                 format!("invalid multisig.vault_address {}", multisig.vault_address)
             })?;
-            Pubkey::from_str(&multisig.state_address).with_context(|| {
+            let state_address = Pubkey::from_str(&multisig.state_address).with_context(|| {
                 format!("invalid multisig.state_address {}", multisig.state_address)
             })?;
+            if !vault_addresses.insert(vault_address) {
+                bail!("duplicate multisig.vault_address {vault_address}");
+            }
+            if !state_addresses.insert(state_address) {
+                bail!("duplicate multisig.state_address {state_address}");
+            }
         }
 
         let idl_path = self.resolved_idl_path(config_path);
@@ -434,7 +489,7 @@ impl Config {
 
         let mut idl_signals = None;
         for (index, alert) in self.alert_rules.iter().enumerate() {
-            if matches!(alert.kind, AlertKind::Multisig) && self.multisig.is_none() {
+            if matches!(alert.kind, AlertKind::Multisig) && self.multisigs.is_empty() {
                 bail!(
                     "alerts entry at index {index} has kind multisig \
                      but no [multisig] section is configured"
@@ -456,13 +511,14 @@ impl Config {
                     };
                     names.iter().map(String::as_str).collect()
                 }
-                AlertKind::Multisig => action_names(
-                    self.multisig
-                        .as_ref()
-                        .expect("multisig alerts are rejected above without a [multisig] section")
-                        .version,
-                )
-                .to_vec(),
+                AlertKind::Multisig => self
+                    .multisigs
+                    .iter()
+                    .flat_map(|multisig| action_names(multisig.version))
+                    .copied()
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect(),
             };
             if !known_names.contains(&alert.name.as_str()) {
                 bail!(
@@ -476,20 +532,6 @@ impl Config {
         }
 
         Ok(())
-    }
-
-    pub fn multisig_vault_pubkey(&self) -> Option<Pubkey> {
-        self.multisig.as_ref().map(|multisig| {
-            Pubkey::from_str(&multisig.vault_address)
-                .expect("multisig.vault_address is validated while loading config")
-        })
-    }
-
-    pub fn multisig_state_pubkey(&self) -> Option<Pubkey> {
-        self.multisig.as_ref().map(|multisig| {
-            Pubkey::from_str(&multisig.state_address)
-                .expect("multisig.state_address is validated while loading config")
-        })
     }
 }
 
@@ -685,11 +727,11 @@ mod tests {
         Config {
             program_id: program_id.to_string(),
             idl_path: idl_path.to_string(),
-            multisig: Some(MultisigConfig {
+            multisigs: vec![MultisigConfig {
                 vault_address: vault_address.to_string(),
                 state_address: vault_address.to_string(),
                 version: MultisigVersion::V4,
-            }),
+            }],
             ..crate::test_support::config()
         }
     }
@@ -719,7 +761,7 @@ mod tests {
     fn rejects_invalid_multisig_vault_address() {
         let valid = "11111111111111111111111111111111";
         let mut config = config(valid, valid, "Cargo.toml");
-        config.multisig.as_mut().unwrap().vault_address = "not-a-pubkey".to_string();
+        config.multisigs[0].vault_address = "not-a-pubkey".to_string();
 
         let error = config
             .validate(Path::new("microscope.toml"))
@@ -731,7 +773,7 @@ mod tests {
     fn rejects_invalid_multisig_state_address() {
         let valid = "11111111111111111111111111111111";
         let mut config = config(valid, valid, "Cargo.toml");
-        config.multisig.as_mut().unwrap().state_address = "not-a-pubkey".to_string();
+        config.multisigs[0].state_address = "not-a-pubkey".to_string();
 
         assert!(config.validate(Path::new("microscope.toml")).is_err());
     }
@@ -739,7 +781,7 @@ mod tests {
     #[test]
     fn accepts_missing_multisig_config() {
         let mut config = config("11111111111111111111111111111111", "unused", "Cargo.toml");
-        config.multisig = None;
+        config.multisigs.clear();
 
         config
             .validate(Path::new("microscope.toml"))
@@ -759,8 +801,8 @@ state_address = "11111111111111111111111111111111"
 version = "{version}""#
             );
             let config: Config = toml::from_str(&raw).unwrap();
-            let multisig = config.multisig.unwrap();
-            assert_eq!(multisig.version.as_str(), version);
+            assert_eq!(config.multisigs.len(), 1);
+            assert_eq!(config.multisigs[0].version.as_str(), version);
         }
 
         assert!(toml::from_str::<Config>(
@@ -790,9 +832,86 @@ state_address = "11111111111111111111111111111111""#
     }
 
     #[test]
+    fn deserializes_an_array_of_multisigs() {
+        let config: Config = toml::from_str(
+            r#"program_id = "11111111111111111111111111111111"
+idl_path = "Cargo.toml"
+
+[[multisig]]
+vault_address = "DXtFpbPjcn2hxPnw79x1Pfoj35vXh5AsWBkS37YnXMVv"
+state_address = "4CxQs26DewQ1KaCHfyyjktkYjndNdUqCJvVdygtJFwcJ"
+version = "v4"
+
+[[multisig]]
+vault_address = "SysvarC1ock11111111111111111111111111111111"
+state_address = "SysvarRent111111111111111111111111111111111"
+version = "v3""#,
+        )
+        .unwrap();
+
+        let entries = config
+            .multisigs
+            .iter()
+            .map(|multisig| (multisig.vault_address.as_str(), multisig.version))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            entries,
+            [
+                (
+                    "DXtFpbPjcn2hxPnw79x1Pfoj35vXh5AsWBkS37YnXMVv",
+                    MultisigVersion::V4
+                ),
+                (
+                    "SysvarC1ock11111111111111111111111111111111",
+                    MultisigVersion::V3
+                ),
+            ]
+        );
+
+        assert!(toml::from_str::<Config>(
+            r#"program_id = "11111111111111111111111111111111"
+idl_path = "Cargo.toml"
+
+[[multisig]]
+vault_address = "11111111111111111111111111111111"
+state_address = "11111111111111111111111111111111"
+version = "v4"
+multisig_address = "11111111111111111111111111111111""#
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn rejects_a_multisig_configured_twice() {
+        let mut config = crate::test_support::config();
+        let mut other = config.multisigs[0].clone();
+        other.vault_address = "SysvarC1ock11111111111111111111111111111111".to_string();
+        config.multisigs.push(other);
+
+        let error = config
+            .validate(Path::new("microscope.toml"))
+            .expect_err("a repeated state account would be matched to two vaults");
+        assert!(format!("{error:#}").contains("duplicate multisig.state_address"));
+
+        config.multisigs[1].state_address =
+            "SysvarRent111111111111111111111111111111111".to_string();
+        config.multisigs[1].vault_address = config.multisigs[0].vault_address.clone();
+        let error = config
+            .validate(Path::new("microscope.toml"))
+            .expect_err("a repeated vault would double count its activity");
+        assert!(format!("{error:#}").contains("duplicate multisig.vault_address"));
+
+        config.multisigs[1].vault_address =
+            "SysvarC1ock11111111111111111111111111111111".to_string();
+        config
+            .validate(Path::new("microscope.toml"))
+            .expect("distinct multisigs are valid");
+    }
+
+    #[test]
     fn rejects_multisig_alert_without_multisig_config() {
         let mut config = config("11111111111111111111111111111111", "unused", "Cargo.toml");
-        config.multisig = None;
+        config.multisigs.clear();
         config
             .alert_rules
             .push(alert(AlertKind::Multisig, "proposal_created"));
@@ -890,11 +1009,20 @@ state_address = "11111111111111111111111111111111""#
             .validate(Path::new("microscope.toml"))
             .expect("v4 emits spending_limit_used");
 
-        config.multisig.as_mut().unwrap().version = MultisigVersion::V3;
+        config.multisigs[0].version = MultisigVersion::V3;
         let error = config
             .validate(Path::new("microscope.toml"))
             .expect_err("v3 has no spending limits, so the alert could never fire");
         assert!(format!("{error:#}").contains("unknown multisig signal \"spending_limit_used\""));
+
+        let mut v4 = config.multisigs[0].clone();
+        v4.vault_address = "SysvarC1ock11111111111111111111111111111111".to_string();
+        v4.state_address = "SysvarRent111111111111111111111111111111111".to_string();
+        v4.version = MultisigVersion::V4;
+        config.multisigs.push(v4);
+        config
+            .validate(Path::new("microscope.toml"))
+            .expect("one configured v4 multisig can emit spending_limit_used");
     }
 
     #[test]

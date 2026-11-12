@@ -10,6 +10,7 @@ Validate each answer as it arrives using the same rules Terraform enforces at pl
 | `multisig.vault_address` | optional; base58 pubkey for the Squads default vault shown in the UI. Omit the entire section when the deployment has no multisig, multisig alerts then become unavailable |
 | `multisig.state_address` | required with `vault_address`; the corresponding v3 `Ms`, v4 `Multisig`, or Smart Account/v5 `Settings` account. The indexer verifies locally that it derives the default vault |
 | `multisig.version` | required with `vault_address`; one of `v3`, `v4`, `v5`. Explicit, never inferred from the vault |
+| several multisigs | optional; one `[[multisig]]` table per multisig in TOML, or the `multisigs` list in Terraform instead of `multisig` (setting both fails the plan). Versions can be mixed; no `vault_address` or `state_address` may repeat. Adding one to a deployment that polls RPC means removing the RPC checkpoint (`docs/operations.md`) |
 | IDL | path to a JSON IDL; it must declare events, or decoder generation fails. If the file lives outside the repo, copy it into `idl/` and reference that path |
 | datasource | `yellowstone` (default) or `rpc` |
 | `geyser_url` | required in Yellowstone mode; `http(s)://` URL |

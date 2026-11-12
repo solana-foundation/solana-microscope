@@ -9,7 +9,7 @@ Generated for every deployment, independent of the monitored program, so these a
 | Always | `rpc_recovery_disabled`, `rpc_checkpoint_corrupt`, `datasource_updates_dropped`, `log_delivery_stalled` |
 | `datasource.mode = "yellowstone"` | `yellowstone_endpoint_unreachable`, `yellowstone_stream_interrupted`, `yellowstone_gap_unrecovered` |
 | `RPC_URL` set, or `mode = "rpc"` | `rpc_poll_stale`, `rpc_poll_lag`, `rpc_poll_failing`, `rpc_checkpoint_stale`, `rpc_transaction_quarantined` |
-| `[multisig]` configured | `multisig_unmatched_state` |
+| `[multisig]` or `[[multisig]]` configured | `multisig_unmatched_state` |
 
 Only a deployment meeting every condition at once has all of them, and Grafana shows more rules than signals, because each signal generates one rule per notification channel. An operator asking why they never see one of these has probably not met its condition; check the deployment before treating absence as a bug. `microscope.toml` is safe to read. `.env` is not: every variable in it except `MICROSCOPE_DEPLOYMENT` and `MICROSCOPE_ENV` is a credential. The conditions only need to know which variables are set, so read the names alone:
 

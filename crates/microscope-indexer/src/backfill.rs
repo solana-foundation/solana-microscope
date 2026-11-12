@@ -496,7 +496,11 @@ mod tests {
         block_time_of, config_duration, config_flag, fetch_error_is_permanent, parse_duration,
         select_signatures, transaction_update,
     };
-    use crate::{multisig::common::AddressResolver, test_support::squads_v4_vault_execute};
+    use crate::{
+        config::MultisigVersion,
+        multisig::{common::AddressResolver, VerifiedMultisig},
+        test_support::squads_v4_vault_execute,
+    };
 
     const FIXTURES: &[(&str, &str)] = &[
         (
@@ -566,7 +570,18 @@ mod tests {
             .datasource(FixtureDatasource)
             .instruction_with_filters(
                 SquadsMultisigProgramDecoder,
-                crate::multisig::SquadsV4Processor::new(known_vault, known_state),
+                crate::multisig::SquadsV4Processor::new(&[
+                    VerifiedMultisig {
+                        vault_address: known_vault,
+                        state_address: known_state,
+                        version: MultisigVersion::V4,
+                    },
+                    VerifiedMultisig {
+                        vault_address: Pubkey::new_unique(),
+                        state_address: Pubkey::new_unique(),
+                        version: MultisigVersion::V4,
+                    },
+                ]),
                 vec![Box::new(carbon_core::filter::DeduplicationFilter::new(
                     Duration::from_secs(5 * 60),
                 ))],
@@ -629,9 +644,16 @@ mod tests {
         };
 
         let known_vault = Pubkey::from_str("DXtFpbPjcn2hxPnw79x1Pfoj35vXh5AsWBkS37YnXMVv").unwrap();
-        AddressResolver::new(known_vault, state_address, "v4")
-            .match_state(state_address)
-            .expect("decoded instruction uses the resolved multisig state");
+        AddressResolver::new(
+            &[VerifiedMultisig {
+                vault_address: known_vault,
+                state_address,
+                version: MultisigVersion::V4,
+            }],
+            MultisigVersion::V4,
+        )
+        .match_state(state_address)
+        .expect("decoded instruction uses the resolved multisig state");
     }
 
     #[test]

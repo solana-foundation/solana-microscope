@@ -1,8 +1,11 @@
+use std::collections::HashMap;
+
 use carbon_core::{error::CarbonResult, instruction::InstructionProcessorInputType};
 use serde::Serialize;
 use solana_pubkey::Pubkey;
 
-use crate::{instructions, telemetry};
+use super::VerifiedMultisig;
+use crate::{config::MultisigVersion, instructions, telemetry};
 
 #[derive(Clone, Copy)]
 pub struct AddressMatch {
@@ -12,26 +15,32 @@ pub struct AddressMatch {
 }
 
 pub struct AddressResolver {
-    resolved: AddressMatch,
+    vaults_by_state: HashMap<Pubkey, Pubkey>,
+    squads_version: &'static str,
 }
 
 impl AddressResolver {
-    pub fn new(vault_address: Pubkey, state_address: Pubkey, squads_version: &'static str) -> Self {
+    pub fn new(multisigs: &[VerifiedMultisig], version: MultisigVersion) -> Self {
         Self {
-            resolved: AddressMatch {
-                configured_address: vault_address,
-                state_address,
-                squads_version,
-            },
+            vaults_by_state: multisigs
+                .iter()
+                .filter(|multisig| multisig.version == version)
+                .map(|multisig| (multisig.state_address, multisig.vault_address))
+                .collect(),
+            squads_version: version.as_str(),
         }
     }
 
     pub fn match_state(&self, state_address: Pubkey) -> Option<AddressMatch> {
-        if state_address != self.resolved.state_address {
-            telemetry::record_multisig_unmatched_state(self.resolved.squads_version);
+        let Some(&vault_address) = self.vaults_by_state.get(&state_address) else {
+            telemetry::record_multisig_unmatched_state(self.squads_version);
             return None;
-        }
-        Some(self.resolved)
+        };
+        Some(AddressMatch {
+            configured_address: vault_address,
+            state_address,
+            squads_version: self.squads_version,
+        })
     }
 }
 
@@ -88,12 +97,28 @@ mod tests {
     use solana_pubkey::Pubkey;
 
     use super::AddressResolver;
+    use crate::{config::MultisigVersion, multisig::VerifiedMultisig};
+
+    fn multisig(version: MultisigVersion) -> VerifiedMultisig {
+        VerifiedMultisig {
+            vault_address: Pubkey::new_unique(),
+            state_address: Pubkey::new_unique(),
+            version,
+        }
+    }
 
     #[test]
     fn matches_only_the_resolved_state_account() {
         let state = Pubkey::new_unique();
         let vault = Pubkey::new_unique();
-        let resolver = AddressResolver::new(vault, state, "v4");
+        let resolver = AddressResolver::new(
+            &[VerifiedMultisig {
+                vault_address: vault,
+                state_address: state,
+                version: MultisigVersion::V4,
+            }],
+            MultisigVersion::V4,
+        );
 
         let matched = resolver.match_state(state).expect("state account matches");
 
@@ -105,8 +130,46 @@ mod tests {
     }
 
     #[test]
+    fn maps_each_state_account_to_its_own_vault() {
+        let first = multisig(MultisigVersion::V4);
+        let second = multisig(MultisigVersion::V4);
+        let resolver = AddressResolver::new(&[first, second], MultisigVersion::V4);
+
+        for configured in [first, second] {
+            let matched = resolver
+                .match_state(configured.state_address)
+                .expect("every configured state account matches");
+            assert_eq!(matched.configured_address, configured.vault_address);
+            assert_eq!(matched.state_address, configured.state_address);
+        }
+        assert!(resolver.match_state(Pubkey::new_unique()).is_none());
+    }
+
+    #[test]
+    fn ignores_state_accounts_configured_for_another_version() {
+        let v3 = multisig(MultisigVersion::V3);
+        let v4 = multisig(MultisigVersion::V4);
+        let resolver = AddressResolver::new(&[v3, v4], MultisigVersion::V4);
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+
+        metrics::with_local_recorder(&recorder, || {
+            assert!(resolver.match_state(v4.state_address).is_some());
+            assert!(resolver.match_state(v3.state_address).is_none());
+        });
+
+        let unmatched = snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .find(|(key, _, _, _)| key.key().name() == "microscope_multisig_unmatched_state_total")
+            .map(|(_, _, _, value)| value);
+        assert_eq!(unmatched, Some(DebugValue::Counter(1)));
+    }
+
+    #[test]
     fn counts_activity_on_a_state_account_the_deployment_does_not_monitor() {
-        let resolver = AddressResolver::new(Pubkey::new_unique(), Pubkey::new_unique(), "v5");
+        let resolver = AddressResolver::new(&[multisig(MultisigVersion::V5)], MultisigVersion::V5);
         let recorder = DebuggingRecorder::new();
         let snapshotter = recorder.snapshotter();
 

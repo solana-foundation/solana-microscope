@@ -150,7 +150,7 @@ fn provisioning_document(
         health_rules.extend(yellowstone_health_rules(channels, pending_seconds));
     }
     health_rules.extend(log_delivery_rules(channels, pending_seconds));
-    if config.multisig.is_some() {
+    if !config.multisigs.is_empty() {
         health_rules.extend(multisig_health_rules(
             channels,
             config.alerting.multisig_unmatched_window_seconds,
@@ -781,37 +781,46 @@ fn log_panel_id(kind: AlertKind) -> Option<u64> {
 }
 
 fn logql_query(config: &Config, alert: &AlertRule) -> anyhow::Result<String> {
-    let (record_kind, signal_path, scope_path, scope_value) = match alert.kind {
-        AlertKind::Event => ("program_event", "name", "program_id", &config.program_id),
+    let (record_kind, signal_path, scope_path, scope_values) = match alert.kind {
+        AlertKind::Event => (
+            "program_event",
+            "name",
+            "program_id",
+            vec![config.program_id.as_str()],
+        ),
         AlertKind::Instruction => (
             "program_instruction",
             "name",
             "program_id",
-            &config.program_id,
+            vec![config.program_id.as_str()],
         ),
         AlertKind::Multisig => {
-            let Some(multisig) = config.multisig.as_ref() else {
+            if config.multisigs.is_empty() {
                 bail!(
                     "multisig alert {} requires a [multisig] section in the config",
                     alert.name
                 );
-            };
+            }
             (
                 "multisig_activity",
                 "action",
                 "vault_address",
-                &multisig.vault_address,
+                config
+                    .multisigs
+                    .iter()
+                    .map(|multisig| multisig.vault_address.as_str())
+                    .collect(),
             )
         }
     };
     let quoted_name = serde_json::to_string(&alert.name)?;
-    let quoted_scope = serde_json::to_string(scope_value)?;
+    let scope_filter = dashboard::scope_filter(&scope_values);
 
     let mut parser = format!(
         "| json kind=\"kind\", signal=\"{signal_path}\", scope=\"{scope_path}\", signature=\"signature\""
     );
     let mut filters =
-        format!("| kind = \"{record_kind}\" | signal = {quoted_name} | scope = {quoted_scope}");
+        format!("| kind = \"{record_kind}\" | signal = {quoted_name} | scope {scope_filter}");
     if alert.kind == AlertKind::Multisig {
         parser.push_str(", failed=\"failed\"");
         filters.push_str(" | failed = \"false\"");
@@ -1097,7 +1106,7 @@ mod tests {
     #[test]
     fn leaves_the_multisig_rule_out_without_a_configured_vault() {
         let mut config = config(vec![]);
-        config.multisig = None;
+        config.multisigs.clear();
         let channels = BTreeSet::from([AlertChannel::Slack]);
 
         let document = provisioning_document(&config, &channels, false).unwrap();
@@ -1403,6 +1412,51 @@ mod tests {
         assert!(logql_query(&config, &alert(AlertKind::Multisig, "proposal_approved"))
             .unwrap()
             .contains("kind = \"multisig_activity\" | signal = \"proposal_approved\" | scope = \"11111111111111111111111111111111\""));
+    }
+
+    #[test]
+    fn multisig_alerts_match_activity_on_every_configured_vault() {
+        let single = config(vec![]);
+        let mut several = config(vec![]);
+        let mut second = several.multisigs[0].clone();
+        second.vault_address = "SysvarC1ock11111111111111111111111111111111".to_string();
+        several.multisigs.push(second);
+        let rule = alert_with_channel(
+            AlertKind::Multisig,
+            "proposal_approved",
+            AlertChannel::Slack,
+        );
+
+        let query = logql_query(&several, &rule).unwrap();
+        assert!(query.contains(
+            "| scope =~ \"11111111111111111111111111111111|SysvarC1ock11111111111111111111111111111111\""
+        ));
+        assert!(!query.contains("| scope = "));
+        assert_eq!(
+            grafana_rule(&several, &rule, Some(AlertChannel::Slack)).unwrap()["uid"],
+            grafana_rule(&single, &rule, Some(AlertChannel::Slack)).unwrap()["uid"],
+            "adding a multisig must not replace the rules that already exist"
+        );
+    }
+
+    #[test]
+    fn a_vault_address_condition_narrows_a_multisig_alert_to_one_vault() {
+        let mut config = config(vec![]);
+        let mut second = config.multisigs[0].clone();
+        second.vault_address = "SysvarC1ock11111111111111111111111111111111".to_string();
+        config.multisigs.push(second);
+        let mut rule = alert(AlertKind::Multisig, "proposal_approved");
+        rule.conditions = vec![AlertCondition {
+            field: "vault_address".to_string(),
+            operator: AlertConditionOperator::Eq,
+            value: Some(AlertConditionValue::String(
+                "SysvarC1ock11111111111111111111111111111111".to_string(),
+            )),
+        }];
+
+        let query = logql_query(&config, &rule).unwrap();
+        assert!(query.contains(", condition_0=\"vault_address\""));
+        assert!(query.contains("| (condition_0 = \"SysvarC1ock11111111111111111111111111111111\")"));
     }
 
     #[test]
