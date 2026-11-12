@@ -14,7 +14,7 @@ An activity alert cannot be interpreted without the config that produced it.
 
 ## What fired
 
-The `transaction` annotation carries the signature and an explorer link, and `signature` is a query label. Pull the record itself from Loki rather than reasoning from the alert text: the alert only proves a match, the record has the decoded `data`.
+The `transaction` annotation carries the signature and an explorer link, and `signature` is a query label. A multisig alert also carries the matched vault in its `vault_address` annotation (query label `scope`). Pull the record itself from Loki rather than reasoning from the alert text: the alert only proves a match, the record has the decoded `data`.
 
 `references/investigate.md` has the record shapes and the query transports. For an instruction alert, the record is `kind = "program_instruction"` with the matching `name` and `signature`.
 
@@ -57,13 +57,15 @@ sum by (signature) (count_over_time({service_name="microscope-indexer"}
   | (<condition filters>) | __error__ = "" [<lookback>s]))
 ```
 
+Multisig alerts group by `(signature, scope)`, and with several multisigs the scope filter is `scope =~ "<vault>|<vault>"`.
+
 The causes, in the order they are worth checking:
 
 - **`__error__ = ""` dropped the record.** A numeric condition against a field that is a string, null, or absent makes Loki mark the line as a conversion error, and the filter removes it. This silently discards a record that otherwise matched. Query without the condition filters to see whether the record is there at all.
 - **The condition does not match the field.** `exists` means present and non-empty: `null` and `""` do not match. Integer values above 2^53 are compared as float64 and must be quoted as strings to compare exactly.
 - **`match = "all"`** needs one single record satisfying every condition, not one record per condition. `match = "any"` with more than one condition compiles to independent OR branches precisely so a missing field in one branch cannot hide a match in another.
 - **Multisig alerts filter `failed = "false"`.** A failed Squads instruction never alerts, and a `failed` condition on a multisig alert is rejected at config load.
-- **The scope filter.** Instruction and event alerts are scoped to `program_id`, multisig alerts to `vault_address`. A record from the right program under a different address is filtered out. For multisig this is what `multisig_unmatched_state` catches.
+- **The scope filter.** Instruction and event alerts are scoped to `program_id`, multisig alerts to the configured `vault_address` values, all of them when several multisigs are configured. A record from the right program under a different address is filtered out. For multisig this is what `multisig_unmatched_state` catches.
 - **The lookback window** must cover the activity. It defaults from `[alerting]` and is overridable per alert.
 - **The record was never produced.** Confirm with `microscope_instructions_total{instruction="<name>"}` or `microscope_program_events_total{event="<name>"}`. If the counter is flat, the problem is upstream of alerting: the datasource, the decoder, or genuinely no activity.
 

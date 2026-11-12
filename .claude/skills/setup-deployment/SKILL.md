@@ -6,7 +6,7 @@ user-invocable: true
 
 # Deployment setup
 
-Interview the operator, write the config files for their deployment target, then verify with the repo's own tooling. One deployment monitors one Solana program and, optionally, one Squads multisig.
+Interview the operator, write the config files for their deployment target, then verify with the repo's own tooling. One deployment monitors one Solana program and, optionally, any number of Squads multisigs.
 
 | Target | Files written | Seed from | Verified by |
 |--------|---------------|-----------|-------------|

@@ -20,7 +20,8 @@ tunnel to reach Grafana.
 Both deployments require:
 
 - a program ID and local IDL file;
-- optionally, a Squads default vault, internal state account, and explicit v3/v4/v5 version;
+- optionally, a Squads default vault, internal state account, and explicit v3/v4/v5 version
+  (`multisig`), or a list of them (`multisigs`) to monitor several, not both;
 - decoded-event table fields;
 - alert timing defaults and program event, instruction, or Squads multisig rules;
 - a Yellowstone gRPC URL and optional token, or a Solana JSON-RPC URL for RPC mode;
@@ -126,7 +127,9 @@ empty, except in `grafana_cloud` mode, where delivery uses the hosted stack's
 contact points.
 
 Alert `name` must be a snake_cased instruction or event from the IDL, or a
-Squads action for the configured multisig version. Terraform cannot check
+Squads action for a configured multisig version. A `multisig` rule covers
+every configured multisig; add a `vault_address` condition to narrow it to one.
+Terraform cannot check
 this; a wrong name applies cleanly and then fails the reconcile on the VM.
 Check `bootstrap_log` when a revision does not apply.
 

@@ -7,6 +7,13 @@ vault_address = ${jsonencode(multisig.vault_address)}
 state_address = ${jsonencode(multisig.state_address)}
 version = ${jsonencode(multisig.version)}
 %{ endif ~}
+%{ for entry in multisigs ~}
+
+[[multisig]]
+vault_address = ${jsonencode(entry.vault_address)}
+state_address = ${jsonencode(entry.state_address)}
+version = ${jsonencode(entry.version)}
+%{ endfor ~}
 
 [datasource]
 mode = ${jsonencode(datasource.mode)}

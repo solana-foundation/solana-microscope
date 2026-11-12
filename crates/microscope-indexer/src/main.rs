@@ -88,55 +88,68 @@ fn deduplication_filters() -> Vec<Box<dyn Filter>> {
 
 fn with_instruction_pipes(
     builder: PipelineBuilder,
-    multisig: Option<VerifiedMultisig>,
+    multisigs: &[VerifiedMultisig],
 ) -> PipelineBuilder {
     let builder = builder.instruction_with_filters(
         ProgramDecoder,
         EventProcessor::default(),
         deduplication_filters(),
     );
-    let builder = builder.transaction::<shipped::NoInstructions, _>(shipped::ShippedProcessor);
-    let Some(multisig) = multisig else {
-        return builder;
-    };
-    match multisig.version {
-        MultisigVersion::V3 => builder.instruction_with_filters(
+    let mut builder = builder.transaction::<shipped::NoInstructions, _>(shipped::ShippedProcessor);
+    let configures = |version| multisigs.iter().any(|multisig| multisig.version == version);
+    if configures(MultisigVersion::V3) {
+        builder = builder.instruction_with_filters(
             SquadsMplDecoder,
-            SquadsV3Processor::new(multisig.vault_address, multisig.state_address),
+            SquadsV3Processor::new(multisigs),
             deduplication_filters(),
-        ),
-        MultisigVersion::V4 => builder.instruction_with_filters(
-            SquadsMultisigProgramDecoder,
-            SquadsV4Processor::new(multisig.vault_address, multisig.state_address),
-            deduplication_filters(),
-        ),
-        MultisigVersion::V5 => builder.instruction_with_filters(
-            SquadsSmartAccountProgramDecoder,
-            SmartAccountProcessor::new(multisig.vault_address, multisig.state_address),
-            deduplication_filters(),
-        ),
+        );
     }
+    if configures(MultisigVersion::V4) {
+        builder = builder.instruction_with_filters(
+            SquadsMultisigProgramDecoder,
+            SquadsV4Processor::new(multisigs),
+            deduplication_filters(),
+        );
+    }
+    if configures(MultisigVersion::V5) {
+        builder = builder.instruction_with_filters(
+            SquadsSmartAccountProgramDecoder,
+            SmartAccountProcessor::new(multisigs),
+            deduplication_filters(),
+        );
+    }
+    builder
 }
 
-fn verify_configured_multisig(config: &Config) -> Option<VerifiedMultisig> {
-    let multisig_config = config.multisig.as_ref()?;
-    let verified = multisig::verify(
-        config
-            .multisig_vault_pubkey()
-            .expect("the multisig section is present and validated"),
-        config
-            .multisig_state_pubkey()
-            .expect("the multisig section is present and validated"),
-        multisig_config.version,
-    )
-    .unwrap_or_else(|error| panic!("invalid configured multisig: {error:#}"));
-    log::info!(
-        "verified configured Squads {} vault {} and state account {}",
-        verified.version,
-        verified.vault_address,
-        verified.state_address
-    );
-    Some(verified)
+fn verify_configured_multisigs(config: &Config) -> Vec<VerifiedMultisig> {
+    config
+        .multisigs
+        .iter()
+        .map(|multisig_config| {
+            let verified = multisig::verify(
+                multisig_config.vault_pubkey(),
+                multisig_config.state_pubkey(),
+                multisig_config.version,
+            )
+            .unwrap_or_else(|error| panic!("invalid configured multisig: {error:#}"));
+            log::info!(
+                "verified configured Squads {} vault {} and state account {}",
+                verified.version,
+                verified.vault_address,
+                verified.state_address
+            );
+            verified
+        })
+        .collect()
+}
+
+fn joined_or_none(values: impl Iterator<Item = String>) -> String {
+    let joined = values.collect::<Vec<_>>().join(",");
+    if joined.is_empty() {
+        "none".to_string()
+    } else {
+        joined
+    }
 }
 
 /// Streaming datasources recover their own disconnects at best, never their own
@@ -147,13 +160,13 @@ fn with_rpc_recovery(
     builder: PipelineBuilder,
     stream: impl Datasource + 'static,
     config: &Config,
-    multisig_state_address: Option<solana_pubkey::Pubkey>,
+    multisig_state_addresses: &[solana_pubkey::Pubkey],
     stream_name: &str,
 ) -> (PipelineBuilder, ShutdownStrategy) {
     let delivered = delivered::DeliveredSignatures::new();
     match rpc_polling::RpcPollingDatasource::from_env(
         PROGRAM_ID,
-        multisig_state_address,
+        multisig_state_addresses,
         Duration::from_secs(config.datasource.poll_interval_seconds),
         config.datasource.replay_window_slots,
         Some(delivered.clone()),
@@ -189,7 +202,7 @@ async fn main() -> CarbonResult<()> {
             dashboard_output_dir,
         } => {
             let config = load_config(&config_path);
-            verify_configured_multisig(&config);
+            verify_configured_multisigs(&config);
             let alerting_output =
                 alerting::generate(&config, &alerting_output_dir).unwrap_or_else(|err| {
                     panic!("failed to generate Grafana alerting config: {err:?}")
@@ -221,32 +234,37 @@ async fn main() -> CarbonResult<()> {
         "microscope-indexer starting: program_id={} idl_path={} multisig_vault={} multisig_version={} datasource={} alert_rules={}",
         config.program_id,
         config.idl_path,
-        config
-            .multisig
-            .as_ref()
-            .map(|multisig| multisig.vault_address.as_str())
-            .unwrap_or("none"),
-        config
-            .multisig
-            .as_ref()
-            .map(|multisig| multisig.version.as_str())
-            .unwrap_or("none"),
+        joined_or_none(
+            config
+                .multisigs
+                .iter()
+                .map(|multisig| multisig.vault_address.clone())
+        ),
+        joined_or_none(
+            config
+                .multisigs
+                .iter()
+                .map(|multisig| multisig.version.to_string())
+        ),
         config.datasource.mode.as_str(),
         config.alert_rules.len(),
     );
 
     telemetry::install();
     health::serve().await;
-    let multisig = verify_configured_multisig(&config);
-    let multisig_state_address = multisig.map(|verified| verified.state_address);
+    let multisigs = verify_configured_multisigs(&config);
+    let multisig_state_addresses = multisigs
+        .iter()
+        .map(|verified| verified.state_address)
+        .collect::<Vec<_>>();
 
     let builder = Pipeline::builder().metrics(Arc::new(LogMetrics::new()));
     let (builder, shutdown_strategy) = match config.datasource.mode {
         DatasourceMode::Yellowstone => with_rpc_recovery(
             builder,
-            datasource::yellowstone(&config.program_id, multisig_state_address),
+            datasource::yellowstone(&config.program_id, &multisig_state_addresses),
             &config,
-            multisig_state_address,
+            &multisig_state_addresses,
             "Yellowstone",
         ),
         DatasourceMode::Rpc => {
@@ -255,7 +273,7 @@ async fn main() -> CarbonResult<()> {
             (
                 builder.datasource(rpc_polling::RpcPollingDatasource::require_from_env(
                     PROGRAM_ID,
-                    multisig_state_address,
+                    &multisig_state_addresses,
                     Duration::from_secs(config.datasource.poll_interval_seconds),
                     config.datasource.replay_window_slots,
                 )),
@@ -263,7 +281,7 @@ async fn main() -> CarbonResult<()> {
             )
         }
     };
-    let mut pipeline = with_instruction_pipes(builder, multisig)
+    let mut pipeline = with_instruction_pipes(builder, &multisigs)
         .shutdown_strategy(shutdown_strategy)
         .build()?;
     health::mark_started();
@@ -313,13 +331,15 @@ async fn run_backfill(
         .expect("system clock predates the unix epoch")
         .as_secs();
     let cutoff_unix = started_unix as i64 - since.as_secs() as i64;
-    let multisig = verify_configured_multisig(&config);
+    let multisigs = verify_configured_multisigs(&config);
     log::info!(
         "backfilling {} and {} since unix time {cutoff_unix} into {loki_url}",
         config.program_id,
-        multisig
-            .map(|verified| verified.vault_address.to_string())
-            .unwrap_or_else(|| "none".to_string()),
+        joined_or_none(
+            multisigs
+                .iter()
+                .map(|verified| verified.vault_address.to_string())
+        ),
     );
 
     let pusher = tokio::spawn(backfill::push_records(
@@ -332,7 +352,10 @@ async fn run_backfill(
     let mut builder = Pipeline::builder();
     for address in rpc_polling::monitored_addresses(
         PROGRAM_ID,
-        multisig.map(|verified| verified.state_address),
+        &multisigs
+            .iter()
+            .map(|verified| verified.state_address)
+            .collect::<Vec<_>>(),
     ) {
         builder = builder.datasource(backfill::BackfillDatasource::new(
             rpc_url.clone(),
@@ -342,7 +365,7 @@ async fn run_backfill(
         ));
     }
     let cancellation = tokio_util::sync::CancellationToken::new();
-    let pipeline_result = with_instruction_pipes(builder, multisig)
+    let pipeline_result = with_instruction_pipes(builder, &multisigs)
         .datasource_cancellation_token(cancellation.clone())
         .shutdown_strategy(ShutdownStrategy::ProcessPending)
         .build()?
@@ -464,6 +487,14 @@ mod tests {
         assert_eq!(super::carbon_failed_updates(&snapshot), 3);
     }
 
+    fn multisig(version: MultisigVersion) -> VerifiedMultisig {
+        VerifiedMultisig {
+            vault_address: Pubkey::new_unique(),
+            state_address: Pubkey::new_unique(),
+            version,
+        }
+    }
+
     #[test]
     fn registers_only_the_configured_squads_decoder() {
         for version in [
@@ -471,24 +502,40 @@ mod tests {
             MultisigVersion::V4,
             MultisigVersion::V5,
         ] {
-            let builder = with_instruction_pipes(
-                Pipeline::builder(),
-                Some(VerifiedMultisig {
-                    vault_address: Pubkey::new_unique(),
-                    state_address: Pubkey::new_unique(),
-                    version,
-                }),
-            );
+            let builder = with_instruction_pipes(Pipeline::builder(), &[multisig(version)]);
 
             assert_eq!(builder.instruction_pipes.len(), 2);
         }
+    }
+
+    #[test]
+    fn registers_one_squads_decoder_per_configured_version() {
+        let same_version = [multisig(MultisigVersion::V4), multisig(MultisigVersion::V4)];
+        assert_eq!(
+            with_instruction_pipes(Pipeline::builder(), &same_version)
+                .instruction_pipes
+                .len(),
+            2
+        );
+
+        let mixed = [
+            multisig(MultisigVersion::V3),
+            multisig(MultisigVersion::V5),
+            multisig(MultisigVersion::V3),
+        ];
+        assert_eq!(
+            with_instruction_pipes(Pipeline::builder(), &mixed)
+                .instruction_pipes
+                .len(),
+            3
+        );
     }
 
     /// Carbon runs transaction pipes after every instruction pipe, making the
     /// journal a completion boundary rather than a first-instruction one.
     #[test]
     fn journals_shipped_transactions_from_a_transaction_pipe() {
-        let builder = with_instruction_pipes(Pipeline::builder(), None);
+        let builder = with_instruction_pipes(Pipeline::builder(), &[]);
 
         assert_eq!(builder.transaction_pipes.len(), 1);
     }
