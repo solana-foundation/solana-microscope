@@ -54,8 +54,9 @@ Squads panels stay empty until the multisig produces a supported action.
 
 ### Indexer refuses to start
 
-The decoder is compiled in, so the `program_id` and IDL in `microscope.toml`
-must be the ones the image was built from. Change both together and
+The decoders are compiled in, so every `program_id` and IDL in
+`microscope.toml`, and their order under `[[programs]]`, must be the ones the
+image was built from. Change them together and
 `docker compose up --build --detach`. A `[multisig]` rejection is the vault and
 state pair or the `version`, see above.
 

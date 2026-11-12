@@ -1,5 +1,15 @@
+%{ if program_id != null ~}
 program_id = ${jsonencode(program_id)}
 idl_path = "idl/program.json"
+%{ endif ~}
+%{ for index, entry in programs ~}
+%{ if index > 0 ~}
+
+%{ endif ~}
+[[programs]]
+program_id = ${jsonencode(entry.program_id)}
+idl_path = ${jsonencode(entry.idl_path)}
+%{ endfor ~}
 %{ if multisig != null ~}
 
 [multisig]
@@ -60,5 +70,8 @@ lookback_window_seconds = ${alert.lookback_window_seconds}
 %{ endif ~}
 %{ if alert.evaluation_interval_seconds != null ~}
 evaluation_interval_seconds = ${alert.evaluation_interval_seconds}
+%{ endif ~}
+%{ if alert.program_id != null ~}
+program_id = ${jsonencode(alert.program_id)}
 %{ endif ~}
 %{ endfor ~}

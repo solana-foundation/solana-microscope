@@ -25,15 +25,24 @@ pub fn initialize_transactions() {
     metrics::counter!("microscope_errors_total").increment(0);
 }
 
-pub fn record_instruction(instruction_name: String) {
-    metrics::counter!("microscope_instructions_total", "instruction" => instruction_name)
-        .increment(1);
+pub fn record_instruction(program_id: String, instruction_name: String) {
+    metrics::counter!(
+        "microscope_instructions_total",
+        "program_id" => program_id,
+        "instruction" => instruction_name
+    )
+    .increment(1);
 }
 
-#[cfg(program_events)]
-pub fn record_program_event(event_name: String, source: &'static str, failed: bool) {
+pub fn record_program_event(
+    program_id: String,
+    event_name: String,
+    source: &'static str,
+    failed: bool,
+) {
     metrics::counter!(
         "microscope_program_events_total",
+        "program_id" => program_id,
         "event" => event_name,
         "source" => source,
         "failed" => if failed { "true" } else { "false" }
@@ -41,7 +50,6 @@ pub fn record_program_event(event_name: String, source: &'static str, failed: bo
     .increment(1);
 }
 
-#[cfg(program_events)]
 pub fn record_event_decode_failures(source: &'static str, rejected: u64) {
     metrics::counter!("microscope_event_decode_failures_total", "source" => source)
         .increment(rejected);

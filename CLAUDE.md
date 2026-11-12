@@ -1,7 +1,7 @@
 # solana-microscope
 
 Rust indexer + Prometheus/Loki/Grafana docker-compose stack, templated with Terraform.
-One deployment monitors one Solana program (optionally one Squads-controlled account).
+One deployment monitors one or more Solana programs (optionally with Squads multisigs).
 Users clone and deploy in their own cloud; we never host.
 
 ## Gotchas
@@ -23,24 +23,38 @@ A `cargo check` failing on "all possible versions conflict" is that, not a real 
 
 ### Decoder crates are generated, only their manifests are committed
 
-`crates/{program,squads-v3,squads-v4,squads-smart-account}-decoder/` are gitignored
-output of `scripts/generate-decoder.sh` (`just generate`), which needs
-`microscope.toml` to exist. Each has its own `[workspace]` and is in the root
-`exclude` list.
+`crates/programs/` and `crates/{squads-v3,squads-v4,squads-smart-account}-decoder/`
+are gitignored output of `scripts/generate-decoder.sh` (`just generate`), which
+needs `microscope.toml` to exist. Each decoder has its own `[workspace]` and is
+covered by the root `exclude` list.
+
+- `crates/programs/<n>/` is the decoder for the n-th configured program.
+  `crates/programs/` itself is a generated glue crate (`microscope-programs`):
+  it depends on every program decoder, re-exports each as `p<n>` under uniform
+  names, and lists them in `for_each_program!`. The indexer depends only on the
+  glue crate, and `programs.rs` turns that list into pipes, so the number of
+  programs never appears in a committed manifest.
 
 - Each crate's generated `Cargo.toml` is committed anyway, because Dependabot
   never runs the generator and its cargo updates fail on a missing path dep.
   Commit them as the generator emits them for `microscope.toml.example`, so the
-  committed `Cargo.lock` matches a real build. A different IDL can change
-  `program-decoder/Cargo.toml` locally; do not commit that.
+  committed `Cargo.lock` matches a real build. A different IDL or a second
+  program can change the manifests under `crates/programs/` and `Cargo.lock`
+  locally; do not commit that.
 
 - Every Justfile target that compiles depends on `generate` first. Bare `cargo build`
   on a fresh clone fails.
 - `fmt`/`clippy` use `-p microscope-indexer` and `--no-deps` deliberately. `--all`
   reaches into generated code and gates CI on codegen lints.
-- The script rewrites the IDL's program name to `program` so the generated Rust API
-  is stable across IDLs. It no longer patches the generated `Cargo.toml`: the
+- The script rewrites the IDL's program name to `program` (then `program_1`,
+  `program_2`, ...) so the generated Rust API is stable across IDLs. The
+  generator's package name for a numbered program differs between Anchor and
+  Codama IDLs, so the script reads it back from the generated manifest instead
+  of predicting it. It no longer patches the generated `Cargo.toml`: the
   generator emits the matching `carbon-core` and `solana-*` versions itself.
+- `cfg(program_events)` now only gates tests that need the first program's
+  generated events. Whether a program declares events is a per-program constant
+  (`Program::DECLARES_EVENTS`).
 - Regeneration is gated by `.microscope-source.sha256` over IDL + script +
   `package-lock.json`. Editing the generated crates directly is silently discarded.
 

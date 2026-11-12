@@ -702,9 +702,12 @@ fn grafana_rule(
     let query = logql_query(config, alert)?;
     let lookback_window_seconds = alert.lookback_window_seconds(&config.alerting);
     let conditions = serde_json::to_string(&alert.conditions)?;
+    let program_ids = config.alert_program_ids(alert);
+    let names_matched_program = names_matched_program(alert, &program_ids);
+    let program_ids = program_ids.join(",");
     let canonical = format!(
         "{}\0{}\0{}\0{}\0{}\0{}\0{}",
-        config.program_id,
+        program_ids,
         alert.kind,
         alert.name,
         alert.match_mode.as_str(),
@@ -742,6 +745,9 @@ fn grafana_rule(
     if alert.kind == AlertKind::Multisig {
         annotations["vault_address"] = json!("{{ $labels.scope }}");
     }
+    if names_matched_program {
+        annotations["program_id"] = json!("{{ $labels.scope }}");
+    }
     if let Some(panel_id) = log_panel_id(alert.kind) {
         annotations["__dashboardUid__"] = json!(dashboard::OVERVIEW_UID);
         annotations["__panelId__"] = json!(panel_id.to_string());
@@ -761,7 +767,7 @@ fn grafana_rule(
         "annotations": annotations,
         "labels": {
             "channel": channel,
-            "program_id": config.program_id,
+            "program_id": program_ids,
             "severity": alert.severity.as_str(),
             "signal_kind": alert.kind.as_str(),
             "signal_name": alert.name,
@@ -773,6 +779,12 @@ fn grafana_rule(
     }
 
     Ok(rule)
+}
+
+/// A rule covering one program has nothing to name, and grouping by scope
+/// would only change its query.
+fn names_matched_program(alert: &AlertRule, program_ids: &[&str]) -> bool {
+    alert.kind != AlertKind::Multisig && program_ids.len() > 1
 }
 
 fn log_panel_id(kind: AlertKind) -> Option<u64> {
@@ -789,13 +801,13 @@ fn logql_query(config: &Config, alert: &AlertRule) -> anyhow::Result<String> {
             "program_event",
             "name",
             "program_id",
-            vec![config.program_id.as_str()],
+            config.alert_program_ids(alert),
         ),
         AlertKind::Instruction => (
             "program_instruction",
             "name",
             "program_id",
-            vec![config.program_id.as_str()],
+            config.alert_program_ids(alert),
         ),
         AlertKind::Multisig => {
             if config.multisigs.is_empty() {
@@ -819,7 +831,9 @@ fn logql_query(config: &Config, alert: &AlertRule) -> anyhow::Result<String> {
     let quoted_name = serde_json::to_string(&alert.name)?;
     let scope_filter = dashboard::scope_filter(&scope_values);
 
-    let grouping = if alert.kind == AlertKind::Multisig {
+    let grouping = if alert.kind == AlertKind::Multisig
+        || names_matched_program(alert, &config.alert_program_ids(alert))
+    {
         "signature, scope"
     } else {
         "signature"
@@ -994,6 +1008,7 @@ mod tests {
     use crate::config::{
         AlertChannel, AlertCondition, AlertConditionOperator, AlertConditionValue, AlertKind,
         AlertMatch, AlertRule, AlertSeverity, AlertingConfig, Config, DatasourceMode,
+        ProgramConfig,
     };
 
     use super::{
@@ -1011,6 +1026,7 @@ mod tests {
             channels: vec![],
             lookback_window_seconds: None,
             evaluation_interval_seconds: None,
+            program_id: None,
         }
     }
 
@@ -1021,10 +1037,9 @@ mod tests {
     }
 
     fn config(alert_rules: Vec<AlertRule>) -> Config {
-        Config {
-            alert_rules,
-            ..crate::test_support::config()
-        }
+        let mut config = crate::test_support::config();
+        config.alert_rules = alert_rules;
+        config
     }
 
     #[test]
@@ -1450,6 +1465,36 @@ mod tests {
             grafana_rule(&several, &rule, Some(AlertChannel::Slack)).unwrap()["uid"],
             grafana_rule(&single, &rule, Some(AlertChannel::Slack)).unwrap()["uid"],
             "adding a multisig must not replace the rules that already exist"
+        );
+    }
+
+    #[test]
+    fn program_alerts_cover_every_program_unless_one_is_named() {
+        let single = config(vec![]);
+        let mut several = config(vec![]);
+        several.programs.push(ProgramConfig {
+            program_id: "SysvarC1ock11111111111111111111111111111111".to_string(),
+            idl_path: "Cargo.toml".to_string(),
+        });
+        let mut rule = alert_with_channel(AlertKind::Event, "transfer", AlertChannel::Slack);
+
+        let query = logql_query(&several, &rule).unwrap();
+        assert!(query.contains(
+            "| scope =~ \"11111111111111111111111111111111|SysvarC1ock11111111111111111111111111111111\""
+        ));
+        assert!(query.contains("sum by (signature, scope) (count_over_time("));
+        let covering = grafana_rule(&several, &rule, Some(AlertChannel::Slack)).unwrap();
+        assert_eq!(covering["annotations"]["program_id"], "{{ $labels.scope }}");
+
+        let unnamed = grafana_rule(&single, &rule, Some(AlertChannel::Slack)).unwrap();
+        rule.program_id = Some("11111111111111111111111111111111".to_string());
+        let query = logql_query(&several, &rule).unwrap();
+        assert!(query.contains("| scope = \"11111111111111111111111111111111\""));
+        assert!(query.contains("sum by (signature) (count_over_time("));
+        assert_eq!(
+            grafana_rule(&several, &rule, Some(AlertChannel::Slack)).unwrap(),
+            unnamed,
+            "naming the program keeps the rule a single-program deployment had"
         );
     }
 

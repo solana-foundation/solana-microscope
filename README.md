@@ -42,8 +42,8 @@ Yellowstone gRPC --.
 RPC polling -------'                `-> Alloy -> Loki ----> alerts
 ```
 
-One deployment monitors one program and, optionally, any number of Squads
-multisigs.
+One deployment monitors one or more programs and, optionally, any number of
+Squads multisigs.
 
 ## Quick start
 
@@ -372,6 +372,52 @@ the indexer therefore refuses to run when its config names a different
 `program_id` or an IDL whose contents differ from the one it was built from,
 rather than subscribing successfully and decoding nothing.
 
+To monitor several programs in one deployment, replace the top-level
+`program_id` and `idl_path` with one table per program. A repeated `program_id`
+is rejected:
+
+```toml
+[[programs]]
+program_id = "<FIRST_PROGRAM_ID>"
+idl_path = "idl/first.json"
+
+[[programs]]
+program_id = "<SECOND_PROGRAM_ID>"
+idl_path = "idl/second.json"
+```
+
+`just generate` and the image build produce one decoder per table, in this
+order, so the list is a build input the same way a single program is: change it
+and rebuild. Every program shares the one Yellowstone subscription and the one
+RPC poller. Each monitored address costs one `getSignaturesForAddress` call per
+poll, and Yellowstone endpoints cap how many accounts one filter may include
+(10 in the reference server configuration), counting programs and multisig
+state accounts together.
+
+Records, the event table and the instruction and event counters carry
+`program_id`. An `event` or `instruction` alert matches its name on every
+configured program and reports the one that matched in a `program_id`
+annotation. Set `program_id` on the alert to watch one program only; the name
+then has to be declared by that program's IDL:
+
+```toml
+[[alerts]]
+kind = "instruction"
+name = "withdraw"
+program_id = "<SECOND_PROGRAM_ID>"
+severity = "warning"
+channels = ["slack"]
+```
+
+An alert that names its program keeps the rule UID it had while that program
+was the only one configured, so pin existing alerts this way when adding a
+second program to a running deployment. Adding or removing a program also
+changes the monitored addresses, which disables RPC recovery until the RPC
+checkpoint is removed; see
+[RPC recovery disabled itself](docs/operations.md#rpc-recovery-disabled-itself).
+In Terraform, set the `programs` list instead of `program_id`; see
+[infra/README.md](infra/README.md).
+
 For Squads, configure the default vault shown in the UI, its internal state
 account, and `version` (`v3`, `v4`, or `v5`). The state account is the v3 `Ms`,
 v4 `Multisig`, or Smart Account/v5 `Settings` account. At startup, the indexer
@@ -454,10 +500,13 @@ The VM deployment builds the indexer image on the VM. To deploy into a runtime
 that pulls rather than builds, run the `Publish Docker Image` workflow from your
 fork with your `program_id` and IDL path. It pushes to
 `ghcr.io/<your-org>/<your-repo>` tagged with the program ID and with
-`<program-id>-<short-sha>`.
+`<program-id>-<short-sha>`. For several programs, give both inputs as
+comma-separated lists in the same order; the tag is then
+`<first-program-id>-plus-<fingerprint>`, where the fingerprint identifies the
+ordered list, and the run summary prints the `[[programs]]` config to mount.
 
-Publish from your own fork, not from upstream: one image serves one program and
-one IDL, and the workflow needs both as inputs.
+Publish from your own fork, not from upstream: an image serves only the
+programs and IDLs it was built from, and the workflow needs them as inputs.
 
 The image carries no `microscope.toml`. Mount the deployment config at
 `/etc/microscope/microscope.toml` and keep secrets in the environment, as

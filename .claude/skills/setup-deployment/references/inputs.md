@@ -6,7 +6,7 @@ Validate each answer as it arrives using the same rules Terraform enforces at pl
 
 | Input | Rule |
 |-------|------|
-| `program_id` | base58 pubkey, 32-44 chars |
+| `program_id` | base58 pubkey, 32-44 chars. For several programs, write one `[[programs]]` table per program (`program_id` and `idl_path` each) instead of the top-level keys; in Terraform set the `programs` list (`program_id` and `idl_path` per entry) instead of `program_id` |
 | `multisig.vault_address` | optional; base58 pubkey for the Squads default vault shown in the UI. Omit the entire section when the deployment has no multisig, multisig alerts then become unavailable |
 | `multisig.state_address` | required with `vault_address`; the corresponding v3 `Ms`, v4 `Multisig`, or Smart Account/v5 `Settings` account. The indexer verifies locally that it derives the default vault |
 | `multisig.version` | required with `vault_address`; one of `v3`, `v4`, `v5`. Explicit, never inferred from the vault |

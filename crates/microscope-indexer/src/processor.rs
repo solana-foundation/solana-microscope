@@ -1,33 +1,36 @@
-use std::collections::{HashSet, VecDeque};
+use std::{
+    collections::{HashSet, VecDeque},
+    marker::PhantomData,
+    sync::{Arc, Mutex},
+};
 
 use carbon_core::{
     error::CarbonResult, instruction::InstructionProcessorInputType, processor::Processor,
 };
-use carbon_program_decoder::instructions::ProgramInstruction;
 use solana_signature::Signature;
 
-#[cfg(program_events)]
-use crate::events;
-use crate::{instructions, telemetry};
+use crate::{events, instructions, programs::Program, telemetry};
 
 const RECENT_SIGNATURE_CAPACITY: usize = 4_096;
 
+/// Shared by every program's processor, so a transaction that touches several
+/// monitored programs is counted once.
 #[derive(Default)]
-pub struct EventProcessor {
-    recent_signatures: HashSet<Signature>,
-    signature_order: VecDeque<Signature>,
+pub struct RecentTransactions {
+    signatures: HashSet<Signature>,
+    order: VecDeque<Signature>,
 }
 
-impl EventProcessor {
-    fn remember_transaction(&mut self, signature: Signature) -> bool {
-        if !self.recent_signatures.insert(signature) {
+impl RecentTransactions {
+    fn remember(&mut self, signature: Signature) -> bool {
+        if !self.signatures.insert(signature) {
             return false;
         }
 
-        self.signature_order.push_back(signature);
-        if self.signature_order.len() > RECENT_SIGNATURE_CAPACITY {
-            if let Some(expired) = self.signature_order.pop_front() {
-                self.recent_signatures.remove(&expired);
+        self.order.push_back(signature);
+        if self.order.len() > RECENT_SIGNATURE_CAPACITY {
+            if let Some(expired) = self.order.pop_front() {
+                self.signatures.remove(&expired);
             }
         }
 
@@ -35,10 +38,26 @@ impl EventProcessor {
     }
 }
 
-impl Processor<InstructionProcessorInputType<'_, ProgramInstruction>> for EventProcessor {
+pub struct EventProcessor<P> {
+    recent_transactions: Arc<Mutex<RecentTransactions>>,
+    program: PhantomData<P>,
+}
+
+impl<P> EventProcessor<P> {
+    pub fn new(recent_transactions: Arc<Mutex<RecentTransactions>>) -> Self {
+        Self {
+            recent_transactions,
+            program: PhantomData,
+        }
+    }
+}
+
+impl<P: Program> Processor<InstructionProcessorInputType<'_, P::Instruction>>
+    for EventProcessor<P>
+{
     async fn process(
         &mut self,
-        input: &InstructionProcessorInputType<'_, ProgramInstruction>,
+        input: &InstructionProcessorInputType<'_, P::Instruction>,
     ) -> CarbonResult<()> {
         let metadata = input.metadata;
         let decoded = input.decoded_instruction;
@@ -66,18 +85,18 @@ impl Processor<InstructionProcessorInputType<'_, ProgramInstruction>> for EventP
             })
         );
 
-        telemetry::record_instruction(instruction_name.clone());
-        #[cfg(program_events)]
-        {
-            let (from_logs, from_children) = match decoded {
-                ProgramInstruction::CpiEvent { .. } => (
+        telemetry::record_instruction(raw.program_id.to_string(), instruction_name.clone());
+        if P::DECLARES_EVENTS {
+            let (from_logs, from_children) = if P::is_event_wrapper(decoded) {
+                (
                     events::DecodedLogs::default(),
                     events::DecodedLogs::default(),
-                ),
-                _ => (
-                    events::decode_logs(metadata),
-                    events::decode_child_events(input.nested_instructions, &raw.program_id),
-                ),
+                )
+            } else {
+                (
+                    events::decode_logs::<P>(metadata),
+                    events::decode_child_events::<P>(input.nested_instructions, &raw.program_id),
+                )
             };
             for (source, rejected) in [
                 (events::EventSource::Log, from_logs.rejected),
@@ -123,11 +142,21 @@ impl Processor<InstructionProcessorInputType<'_, ProgramInstruction>> for EventP
                         "failed": failed,
                     })
                 );
-                telemetry::record_program_event(event.name, source, failed);
+                telemetry::record_program_event(
+                    raw.program_id.to_string(),
+                    event.name,
+                    source,
+                    failed,
+                );
             }
         }
 
-        if self.remember_transaction(transaction.signature) {
+        if self
+            .recent_transactions
+            .lock()
+            .expect("recent transactions lock is not poisoned")
+            .remember(transaction.signature)
+        {
             telemetry::record_transaction(failed);
         }
         telemetry::record_event();
@@ -138,33 +167,33 @@ impl Processor<InstructionProcessorInputType<'_, ProgramInstruction>> for EventP
 
 #[cfg(test)]
 mod tests {
-    use super::{EventProcessor, RECENT_SIGNATURE_CAPACITY};
+    use super::{RecentTransactions, RECENT_SIGNATURE_CAPACITY};
     use crate::test_support::signature;
 
     #[test]
     fn suppresses_recent_duplicate_transactions() {
-        let mut processor = EventProcessor::default();
+        let mut recent = RecentTransactions::default();
         let transaction = signature(1);
 
-        assert!(processor.remember_transaction(transaction));
-        assert!(!processor.remember_transaction(transaction));
-        assert_eq!(processor.recent_signatures.len(), 1);
-        assert_eq!(processor.signature_order.len(), 1);
+        assert!(recent.remember(transaction));
+        assert!(!recent.remember(transaction));
+        assert_eq!(recent.signatures.len(), 1);
+        assert_eq!(recent.order.len(), 1);
     }
 
     #[test]
     fn evicts_the_oldest_transaction_at_capacity() {
-        let mut processor = EventProcessor::default();
+        let mut recent = RecentTransactions::default();
         let oldest = signature(0);
-        assert!(processor.remember_transaction(oldest));
+        assert!(recent.remember(oldest));
 
         for value in 1..=RECENT_SIGNATURE_CAPACITY as u64 {
-            assert!(processor.remember_transaction(signature(value)));
+            assert!(recent.remember(signature(value)));
         }
 
-        assert_eq!(processor.recent_signatures.len(), RECENT_SIGNATURE_CAPACITY);
-        assert_eq!(processor.signature_order.len(), RECENT_SIGNATURE_CAPACITY);
-        assert!(!processor.recent_signatures.contains(&oldest));
-        assert!(processor.remember_transaction(oldest));
+        assert_eq!(recent.signatures.len(), RECENT_SIGNATURE_CAPACITY);
+        assert_eq!(recent.order.len(), RECENT_SIGNATURE_CAPACITY);
+        assert!(!recent.signatures.contains(&oldest));
+        assert!(recent.remember(oldest));
     }
 }
