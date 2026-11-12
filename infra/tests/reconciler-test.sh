@@ -267,6 +267,13 @@ reconcile
 [[ "$(<"$STATE_DIR/applied-revision")" == revision-second-program-idl ]]
 [[ "$(grep --count '^compose build indexer$' "$DOCKER_LOG")" == 7 ]]
 
+printf '[[alerts]]\nprogram_id = "program-three"\n' >>"$BUCKET_DIR/config/microscope.toml"
+write_manifest revision-alert-program
+reconcile
+
+[[ "$(<"$STATE_DIR/applied-revision")" == revision-alert-program ]]
+[[ "$(grep --count '^compose build indexer$' "$DOCKER_LOG")" == 7 ]]
+
 EXTRA_IDLS="$(extra_idl idl/program-1.json | jq '.[0].sha256 = "stale"')"
 write_manifest revision-second-program-raced
 if reconcile; then
@@ -303,9 +310,9 @@ grep --quiet '^MICROSCOPE_DEPLOYMENT="test-deployment"$' "$INSTALL_ROOT/reposito
 [[ "$(grep --count '^compose --file docker-compose.yml --file docker-compose.cloud.yml up --detach --no-build --remove-orphans alloy$' "$DOCKER_LOG")" == 1 ]]
 [[ "$(grep --count -- '--profile local-stack stop alerting-config prometheus loki grafana$' "$DOCKER_LOG")" == 1 ]]
 [[ "$(grep --count -- '--profile local-stack rm --force alerting-config prometheus loki grafana$' "$DOCKER_LOG")" == 1 ]]
-[[ "$(grep --count '^compose run --rm --no-deps alerting-config$' "$DOCKER_LOG")" == 10 ]]
-[[ "$(grep --count 'force-recreate grafana$' "$DOCKER_LOG")" == 9 ]]
-[[ "$(grep --count 'force-recreate indexer$' "$DOCKER_LOG")" == 10 ]]
+[[ "$(grep --count '^compose run --rm --no-deps alerting-config$' "$DOCKER_LOG")" == 11 ]]
+[[ "$(grep --count 'force-recreate grafana$' "$DOCKER_LOG")" == 10 ]]
+[[ "$(grep --count 'force-recreate indexer$' "$DOCKER_LOG")" == 11 ]]
 
 write_manifest revision-seven "$OTHER_REPOSITORY"
 reconcile

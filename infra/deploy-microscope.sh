@@ -247,8 +247,16 @@ if [[ -n "$deploy_key_file" ]]; then
 fi
 
 install -d -m 0755 "$REPOSITORY_DIR/idl"
-program_ids="$(sed -nE 's/^[[:space:]]*"?program_id"?[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' \
-  "$config_file" | paste --serial --delimiters=, -)"
+# Only the programs decoders are generated for: an alert's program_id selector
+# must not trigger a rebuild.
+program_ids="$(awk '
+  BEGIN { monitored = 1 }
+  /^[[:space:]]*\[/ { monitored = /^[[:space:]]*\[\[programs\]\][[:space:]]*$/ }
+  monitored && /^[[:space:]]*"?program_id"?[[:space:]]*=[[:space:]]*"[^"]+"/ {
+    count = split($0, parts, "\"")
+    print parts[count - 1]
+  }
+' "$config_file" | paste --serial --delimiters=, -)"
 if [[ -z "$program_ids" ]]; then
   echo "microscope.toml declares no program_id, so a decoder rebuild cannot be detected" >&2
   exit 1
