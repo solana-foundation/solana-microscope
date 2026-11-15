@@ -36,10 +36,12 @@ TARGET_IDL="$TMP_DIR/idl.json"
 
 # carbon-cli derives crate/type names from the IDL's program name; pin the
 # deployment decoder to "program" so its Rust API is stable across IDLs.
-eval "$(python3 - "$IDL_PATH" "$TARGET_IDL" <<'PY'
+TARGET_VARS="$(PYTHONPATH="$PWD/scripts" python3 - "$IDL_PATH" "$TARGET_IDL" <<'PY'
 import json
 import shlex
 import sys
+
+from idl_prune import prune_unresolved_types
 
 with open(sys.argv[1]) as f:
     idl = json.load(f)
@@ -54,12 +56,20 @@ else:
         idl["metadata"]["name"] = "program"
     standard = "anchor"
     events = idl.get("events") or []
+    try:
+        idl, pruned = prune_unresolved_types(idl)
+    except ValueError as error:
+        print(f"generate-decoder.sh: {error}", file=sys.stderr)
+        sys.exit(1)
+    if pruned:
+        print(f"pruned IDL types with undefined references: {', '.join(pruned)}", file=sys.stderr)
 with open(sys.argv[2], "w") as f:
     json.dump(idl, f)
 print(f"TARGET_STANDARD={shlex.quote(standard)}")
 print(f"TARGET_DECLARES_EVENTS={shlex.quote('true' if events else 'false')}")
 PY
 )"
+eval "$TARGET_VARS"
 
 generate_decoder() {
     local source_idl="$1"
@@ -72,17 +82,17 @@ generate_decoder() {
     local stamp_file="$out_dir/.microscope-source.sha256"
     local source_hash
 
-    source_hash="$(python3 - "$source_idl" "$0" "package-lock.json" "$standard" "$program_id" <<'PY'
+    source_hash="$(python3 - "$source_idl" "$0" "scripts/idl_prune.py" "package-lock.json" "$standard" "$program_id" <<'PY'
 import hashlib
 import pathlib
 import sys
 
 digest = hashlib.sha256()
-for path in sys.argv[1:4]:
+for path in sys.argv[1:5]:
     data = pathlib.Path(path).read_bytes()
     digest.update(len(data).to_bytes(8, "big"))
     digest.update(data)
-for value in sys.argv[4:]:
+for value in sys.argv[5:]:
     data = value.encode()
     digest.update(len(data).to_bytes(8, "big"))
     digest.update(data)

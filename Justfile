@@ -36,6 +36,7 @@ lint: fmt-check lint-check
 
 test: generate
     cargo test --workspace
+    python3 -m unittest discover -s scripts -p 'test_*.py'
 
 check: fmt-check lint-check test
 
