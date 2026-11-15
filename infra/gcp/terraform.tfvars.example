@@ -12,6 +12,11 @@ program_id = "De1egAFMkMWZSN5rYXRj9CAdheBamobVNubTsi9avR44"
 #   state_address = "replace-with-its-internal-state-account"
 #   version       = "v4"
 # }
+# Or, to track several, set multisigs instead (not both); versions can be mixed.
+# multisigs = [
+#   { vault_address = "first-vault", state_address = "first-state-account", version = "v4" },
+#   { vault_address = "second-vault", state_address = "second-state-account", version = "v3" },
+# ]
 # The bundled example. Point a real deployment at its own IDL under
 # infra/gcp/idl/, which is gitignored, so upgrading the template never renames
 # or removes the file a live stack indexes.

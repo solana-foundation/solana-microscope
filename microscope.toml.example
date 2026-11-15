@@ -8,6 +8,8 @@ idl_path = "idl/idl1.json"
 # vault_address = "replace-with-the-vault-shown-in-the-squads-ui"
 # state_address = "replace-with-its-internal-state-account"
 # version = "v4"
+# To monitor several multisigs, write one [[multisig]] table per multisig
+# instead; versions can be mixed.
 
 # Optional. Yellowstone is the default when this section is omitted. A configured
 # RPC_URL adds gap recovery; set mode to "rpc" to use polling as the primary source.

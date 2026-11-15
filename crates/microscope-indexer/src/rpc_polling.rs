@@ -44,7 +44,7 @@ const SHIPPED_JOURNAL_FILE_NAME: &str = "shipped.log";
 pub struct RpcPollingDatasource {
     rpc_url: String,
     program_id: Pubkey,
-    multisig_state_address: Option<Pubkey>,
+    multisig_state_addresses: Vec<Pubkey>,
     poll_interval: Duration,
     replay_window_slots: u64,
     checkpoint_path: PathBuf,
@@ -54,7 +54,7 @@ pub struct RpcPollingDatasource {
 impl RpcPollingDatasource {
     pub fn from_env(
         program_id: Pubkey,
-        multisig_state_address: Option<Pubkey>,
+        multisig_state_addresses: &[Pubkey],
         poll_interval: Duration,
         replay_window_slots: u64,
         delivered: Option<DeliveredSignatures>,
@@ -71,7 +71,7 @@ impl RpcPollingDatasource {
         Some(Self {
             rpc_url,
             program_id,
-            multisig_state_address,
+            multisig_state_addresses: multisig_state_addresses.to_vec(),
             poll_interval,
             replay_window_slots,
             checkpoint_path: state_dir.join(STATE_FILE_NAME),
@@ -81,13 +81,13 @@ impl RpcPollingDatasource {
 
     pub fn require_from_env(
         program_id: Pubkey,
-        multisig_state_address: Option<Pubkey>,
+        multisig_state_addresses: &[Pubkey],
         poll_interval: Duration,
         replay_window_slots: u64,
     ) -> Self {
         Self::from_env(
             program_id,
-            multisig_state_address,
+            multisig_state_addresses,
             poll_interval,
             replay_window_slots,
             None,
@@ -358,12 +358,9 @@ impl RpcPollingDatasource {
     }
 }
 
-pub fn monitored_addresses(
-    program_id: Pubkey,
-    multisig_state_address: Option<Pubkey>,
-) -> Vec<Pubkey> {
+pub fn monitored_addresses(program_id: Pubkey, multisig_state_addresses: &[Pubkey]) -> Vec<Pubkey> {
     let mut addresses = vec![program_id];
-    addresses.extend(multisig_state_address);
+    addresses.extend_from_slice(multisig_state_addresses);
     addresses.sort_unstable();
     addresses.dedup();
     addresses
@@ -502,18 +499,18 @@ mod tests {
     }
 
     #[test]
-    fn monitors_the_program_and_multisig_state_account() {
+    fn monitors_the_program_and_every_multisig_state_account() {
         let program_id = Pubkey::new_unique();
-        let state_address = Pubkey::new_unique();
-        let mut expected = vec![program_id, state_address];
+        let state_addresses = [Pubkey::new_unique(), Pubkey::new_unique()];
+        let mut expected = vec![program_id, state_addresses[0], state_addresses[1]];
         expected.sort_unstable();
 
         assert_eq!(
-            super::monitored_addresses(program_id, Some(state_address)),
+            super::monitored_addresses(program_id, &state_addresses),
             expected
         );
         assert_eq!(
-            super::monitored_addresses(program_id, Some(program_id)),
+            super::monitored_addresses(program_id, &[program_id]),
             vec![program_id]
         );
     }
@@ -556,7 +553,7 @@ mod tests {
         RpcPollingDatasource {
             rpc_url: "https://rpc.example.com".to_string(),
             program_id: Pubkey::new_unique(),
-            multisig_state_address: None,
+            multisig_state_addresses: vec![],
             poll_interval: Duration::from_secs(5),
             replay_window_slots: 300,
             checkpoint_path: ".microscope-state/rpc-polling.json".into(),

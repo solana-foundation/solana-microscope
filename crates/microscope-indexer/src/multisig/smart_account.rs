@@ -6,16 +6,17 @@ use carbon_squads_smart_account_decoder::{
 };
 use solana_pubkey::Pubkey;
 
-use super::common;
+use super::{common, VerifiedMultisig};
+use crate::config::MultisigVersion;
 
 pub struct SmartAccountProcessor {
     address_resolver: common::AddressResolver,
 }
 
 impl SmartAccountProcessor {
-    pub fn new(vault_address: Pubkey, settings_address: Pubkey) -> Self {
+    pub fn new(multisigs: &[VerifiedMultisig]) -> Self {
         Self {
-            address_resolver: common::AddressResolver::new(vault_address, settings_address, "v5"),
+            address_resolver: common::AddressResolver::new(multisigs, MultisigVersion::V5),
         }
     }
 }

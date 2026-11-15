@@ -66,7 +66,7 @@ impl Datasource for RpcPollingDatasource {
     ) -> CarbonResult<()> {
         let rpc_client =
             RpcClient::new_with_commitment(self.rpc_url.clone(), CommitmentConfig::confirmed());
-        let addresses = monitored_addresses(self.program_id, self.multisig_state_address);
+        let addresses = monitored_addresses(self.program_id, &self.multisig_state_addresses);
         log::info!(
             "RPC polling monitors {}",
             addresses

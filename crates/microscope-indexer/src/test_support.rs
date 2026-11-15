@@ -19,11 +19,11 @@ pub fn config() -> Config {
     Config {
         program_id: SYSTEM_PROGRAM.to_string(),
         idl_path: "Cargo.toml".to_string(),
-        multisig: Some(MultisigConfig {
+        multisigs: vec![MultisigConfig {
             vault_address: SYSTEM_PROGRAM.to_string(),
             state_address: SYSTEM_PROGRAM.to_string(),
             version: MultisigVersion::V4,
-        }),
+        }],
         datasource: DatasourceConfig::default(),
         alerting: AlertingConfig::default(),
         dashboard: DashboardConfig::default(),

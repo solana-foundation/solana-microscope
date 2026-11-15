@@ -4,16 +4,17 @@ use carbon_core::{
 use carbon_squads_v3_decoder::{instructions::SquadsMplInstruction, PROGRAM_ID};
 use solana_pubkey::Pubkey;
 
-use super::common;
+use super::{common, VerifiedMultisig};
+use crate::config::MultisigVersion;
 
 pub struct SquadsV3Processor {
     address_resolver: common::AddressResolver,
 }
 
 impl SquadsV3Processor {
-    pub fn new(vault_address: Pubkey, state_address: Pubkey) -> Self {
+    pub fn new(multisigs: &[VerifiedMultisig]) -> Self {
         Self {
-            address_resolver: common::AddressResolver::new(vault_address, state_address, "v3"),
+            address_resolver: common::AddressResolver::new(multisigs, MultisigVersion::V3),
         }
     }
 }

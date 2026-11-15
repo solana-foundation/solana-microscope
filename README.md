@@ -42,7 +42,8 @@ Yellowstone gRPC --.
 RPC polling -------'                `-> Alloy -> Loki ----> alerts
 ```
 
-One deployment monitors one program and, optionally, one Squads multisig.
+One deployment monitors one program and, optionally, any number of Squads
+multisigs.
 
 ## Quick start
 
@@ -167,7 +168,7 @@ Alerts support:
 
 - Kinds: `event`, `instruction`, `multisig`
 - Names: the snake_cased instruction or event declared by `idl_path`, or an
-  action emitted by the configured multisig version; anything else is rejected
+  action emitted by a configured multisig version; anything else is rejected
   at startup instead of becoming a rule that can never fire. A few Squads
   actions whose instructions reference no state account (for example
   `multisig_created` and the `program_*` actions) validate but cannot fire for
@@ -388,6 +389,46 @@ configured address in `vault_address` whichever vault an instruction acted
 on, so use the vault index in the instruction arguments (v4:
 `data.data.args.vault_index`) to narrow an alert to one vault.
 
+To monitor several multisigs, repeat the table as an array of tables. Versions
+can be mixed, every entry is verified at startup, and a repeated
+`vault_address` or `state_address` is rejected:
+
+```toml
+[[multisig]]
+vault_address = "<FIRST_DEFAULT_VAULT>"
+state_address = "<FIRST_STATE_ACCOUNT>"
+version = "v4"
+
+[[multisig]]
+vault_address = "<SECOND_DEFAULT_VAULT>"
+state_address = "<SECOND_STATE_ACCOUNT>"
+version = "v3"
+```
+
+A `kind = "multisig"` alert then fires for activity on any configured vault,
+names that vault in its `vault_address` annotation, and its name only has to be
+emitted by one of the configured versions. Records
+carry their own `vault_address`, so narrow an alert to one multisig with a
+condition on it:
+
+```toml
+[[alerts]]
+kind = "multisig"
+name = "proposal_approved"
+conditions = [
+  { field = "vault_address", operator = "eq", value = "<FIRST_DEFAULT_VAULT>" },
+]
+severity = "critical"
+channels = ["pagerduty"]
+```
+
+The multisig table shows every configured vault; add `vault_address` to
+`dashboard.multisig_fields` to tell them apart. The
+`microscope_multisig_*` metrics are labelled by Squads version, not by vault.
+Adding a multisig to a deployment that polls RPC changes the monitored
+addresses, so remove the RPC checkpoint as described in
+[docs/operations.md](docs/operations.md#rpc-recovery-disabled-itself).
+
 Version-specific instructions are normalized into actions such as
 `proposal_approved`, `transaction_executed`, `member_added`, and
 `threshold_changed`.
@@ -551,7 +592,7 @@ stack running:
 RPC_URL=https://your-rpc-endpoint just backfill 7d
 ```
 
-It crawls the program plus the configured multisig state account backwards
+It crawls the program plus every configured multisig state account backwards
 through `getSignaturesForAddress`, decodes transactions with the same pipeline as the
 live indexer, and pushes the records to Loki backdated to each transaction's
 block time. Backdated records appear at their historical position in the

@@ -8,6 +8,18 @@ version and the section heading below.
 
 ## [Unreleased]
 
+### Added
+
+- One deployment can monitor several Squads multisigs, of mixed versions. Write
+  one `[[multisig]]` table per multisig in `microscope.toml`, or set the new
+  `multisigs` Terraform list instead of `multisig`. Existing single-multisig
+  configs load unchanged and keep their alert rule UIDs. Multisig alerts cover
+  every configured vault and name the one that matched in a `vault_address`
+  annotation; a `vault_address` condition narrows one to a single multisig.
+  Adding a multisig to a running deployment changes the monitored addresses,
+  so RPC recovery stays disabled until the RPC checkpoint is removed (see
+  "RPC recovery disabled itself" in `docs/operations.md`).
+
 ### Fixed
 
 - Event, instruction and multisig alerts on Slack and Telegram no longer send

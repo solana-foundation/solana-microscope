@@ -44,6 +44,34 @@ variable "multisig" {
   }
 }
 
+variable "multisigs" {
+  description = "Optional list of Squads multisigs, each shaped like multisig, for monitoring several in one deployment. Mutually exclusive with multisig."
+  type = list(object({
+    vault_address = string
+    state_address = string
+    version       = string
+  }))
+  default = []
+
+  validation {
+    condition = alltrue([
+      for multisig in var.multisigs :
+      can(regex("^[1-9A-HJ-NP-Za-km-z]{32,44}$", multisig.vault_address)) &&
+      can(regex("^[1-9A-HJ-NP-Za-km-z]{32,44}$", multisig.state_address)) &&
+      contains(["v3", "v4", "v5"], multisig.version)
+    ])
+    error_message = "Each multisigs entry needs base58 Solana public keys for vault_address and state_address, and version v3, v4, or v5."
+  }
+
+  validation {
+    condition = (
+      length(distinct([for multisig in var.multisigs : multisig.vault_address])) == length(var.multisigs) &&
+      length(distinct([for multisig in var.multisigs : multisig.state_address])) == length(var.multisigs)
+    )
+    error_message = "multisigs must not repeat a vault_address or a state_address."
+  }
+}
+
 variable "idl_path" {
   description = "IDL path relative to this Terraform directory."
   type        = string

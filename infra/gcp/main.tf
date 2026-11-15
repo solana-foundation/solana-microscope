@@ -15,6 +15,7 @@ locals {
   microscope_config = templatefile("${path.module}/../microscope.toml.tftpl", {
     program_id = var.program_id
     multisig   = var.multisig
+    multisigs  = var.multisigs
     datasource = var.datasource
     dashboard  = var.dashboard
     alerting   = var.alerting
@@ -339,9 +340,14 @@ resource "google_compute_instance" "this" {
     precondition {
       condition = (
         var.multisig != null ||
+        length(var.multisigs) > 0 ||
         !anytrue([for alert in var.alerts : alert.kind == "multisig"])
       )
-      error_message = "multisig alerts require multisig to be set."
+      error_message = "multisig alerts require multisig or multisigs to be set."
+    }
+    precondition {
+      condition     = var.multisig == null || length(var.multisigs) == 0
+      error_message = "Set multisig or multisigs, not both."
     }
   }
 
