@@ -70,6 +70,42 @@ class PruneUnresolvedTypes(unittest.TestCase):
         _, removed = prune_unresolved_types(idl)
         self.assertEqual(removed, ["Msg"])
 
+    def test_legacy_account_with_inline_type_counts_as_defined(self):
+        vault = {"name": "Vault", "type": {"kind": "struct", "fields": [{"name": "x", "type": "u8"}]}}
+        idl = {
+            "accounts": [vault],
+            "types": [struct("Wrap", ("v", {"defined": "Vault"}))],
+            "instructions": [{"name": "go", "args": [{"name": "w", "type": {"defined": "Wrap"}}]}],
+        }
+        out, removed = prune_unresolved_types(idl)
+        self.assertEqual(removed, [])
+        self.assertEqual([t["name"] for t in out["types"]], ["Wrap"])
+
+    def test_unused_type_over_a_legacy_account_is_kept_not_dropped(self):
+        vault = {"name": "Vault", "type": {"kind": "struct", "fields": [{"name": "x", "type": "u8"}]}}
+        idl = {"accounts": [vault], "types": [struct("Wrap", ("v", {"defined": "Vault"}))], "instructions": []}
+        out, removed = prune_unresolved_types(idl)
+        self.assertEqual(removed, [])
+        self.assertEqual([t["name"] for t in out["types"]], ["Wrap"])
+
+    def test_legacy_event_with_inline_type_counts_as_defined(self):
+        moved = {"name": "Moved", "fields": [], "type": {"kind": "struct", "fields": [{"name": "x", "type": "u8"}]}}
+        idl = {
+            "events": [moved],
+            "types": [struct("Wrap", ("m", {"defined": "Moved"}))],
+            "instructions": [{"name": "go", "args": [{"name": "w", "type": {"defined": "Wrap"}}]}],
+        }
+        out, removed = prune_unresolved_types(idl)
+        self.assertEqual(removed, [])
+        self.assertEqual([t["name"] for t in out["types"]], ["Wrap"])
+
+    def test_unused_type_over_a_legacy_event_is_kept_not_dropped(self):
+        moved = {"name": "Moved", "type": {"kind": "struct", "fields": [{"name": "x", "type": "u8"}]}}
+        idl = {"events": [moved], "types": [struct("Wrap", ("m", {"defined": "Moved"}))], "instructions": []}
+        out, removed = prune_unresolved_types(idl)
+        self.assertEqual(removed, [])
+        self.assertEqual([t["name"] for t in out["types"]], ["Wrap"])
+
     def test_codama_idls_without_types_are_a_noop(self):
         idl = {"program": {"name": "p"}}
         self.assertEqual(prune_unresolved_types(idl), (idl, []))

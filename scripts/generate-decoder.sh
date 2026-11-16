@@ -36,7 +36,7 @@ TARGET_IDL="$TMP_DIR/idl.json"
 
 # carbon-cli derives crate/type names from the IDL's program name; pin the
 # deployment decoder to "program" so its Rust API is stable across IDLs.
-TARGET_VARS="$(PYTHONPATH="$PWD/scripts" python3 - "$IDL_PATH" "$TARGET_IDL" <<'PY'
+TARGET_VARS="$(PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$PWD/scripts" python3 - "$IDL_PATH" "$TARGET_IDL" <<'PY'
 import json
 import shlex
 import sys

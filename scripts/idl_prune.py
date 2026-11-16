@@ -21,8 +21,15 @@ def prune_unresolved_types(idl):
     """
     types = idl.get("types") or []
     kept = list(types)
+    # pre-0.30 Anchor defines accounts and events with an inline "type"; those names are defined too
+    inline = {
+        entry["name"]
+        for section in ("accounts", "events")
+        for entry in idl.get(section) or []
+        if "name" in entry and "type" in entry
+    }
     while True:
-        names = {t["name"] for t in kept}
+        names = {t["name"] for t in kept} | inline
         next_kept = [t for t in kept if all(r in names for r in _refs(t, set()))]
         if len(next_kept) == len(kept):
             break
