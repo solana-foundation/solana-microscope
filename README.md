@@ -211,12 +211,19 @@ Transaction · Dashboard
 
 `Transaction` opens the matched transaction in the explorer. `Dashboard` opens
 the alert's panel in the Grafana dashboard; an alert with no dashboard panel,
-such as an instruction or health alert, links its `Rule` instead. A recovered health alert is one
-`✅ resolved: <signal>` line. One message shows at most five alerts and counts
-the rest, because Telegram limits a message to 4096 characters. The Grafana
-links start with Grafana's `root_url`, which is `http://localhost:3000/` in the
-local stack, and Telegram shows a `localhost` link as plain text; set
-`GF_SERVER_ROOT_URL` on the `grafana` service to get working links.
+such as an instruction or health alert, links its `Rule` instead. A recovered
+health alert is one `✅ resolved: <signal>` line.
+
+Telegram limits a message to 4096 characters, so one message shows at most
+five alerts and counts the rest, and cuts a description at 3000 characters when
+it holds one alert, or at 160 when it holds several. Link addresses are never
+cut: the limits leave room for two links of 200 characters each, so a longer
+explorer URL or Grafana `root_url` reduces that margin.
+
+The Grafana links start with Grafana's `root_url`, which is
+`http://localhost:3000/` in the local stack, and Telegram shows a `localhost`
+link as plain text; set `GF_SERVER_ROOT_URL` on the `grafana` service to get
+working links.
 
 Event, instruction and multisig alerts carry the explorer link alone in a
 `transaction_url` annotation, for notification templates of your own. The

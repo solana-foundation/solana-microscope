@@ -921,25 +921,48 @@ fn condition_description(condition: &AlertCondition) -> anyhow::Result<String> {
     ))
 }
 
-/// Go template for one alert in the Telegram message.
-const TELEGRAM_ALERT: &str = r#"{{ if eq .Labels.severity "critical" }}🚨{{ else if eq .Labels.severity "error" }}🔴{{ else if eq .Labels.severity "warning" }}🟠{{ else }}🔵{{ end }} <b>{{ if eq .Labels.alertname "DatasourceError" }}DatasourceError: {{ end }}{{ or .Labels.signal_name .Labels.alertname | html }}</b>{{ with .Labels.severity }} · {{ . | html }}{{ end }}
-{{ or .Annotations.Error .Annotations.description .Annotations.summary | html }}
+/// Longest description, in characters, when the Telegram message holds one alert.
+const TELEGRAM_SINGLE_DESCRIPTION_LIMIT: usize = 3000;
+
+/// Longest description, in characters, of each alert when the Telegram message holds several.
+const TELEGRAM_GROUPED_DESCRIPTION_LIMIT: usize = 160;
+
+/// Go template for one alert in the Telegram message; `{limit}` stands for the description limit.
+const TELEGRAM_ALERT: &str = r#"{{ if eq .Labels.severity "critical" }}🚨{{ else if eq .Labels.severity "error" }}🔴{{ else if eq .Labels.severity "warning" }}🟠{{ else }}🔵{{ end }} <b>{{ if eq .Labels.alertname "DatasourceError" }}DatasourceError: {{ end }}{{ or .Labels.signal_name .Labels.alertname | html | printf "%.64s" }}</b>{{ with .Labels.severity }} · {{ . | html | printf "%.16s" }}{{ end }}
+{{ or .Annotations.Error .Annotations.description .Annotations.summary | html | printf "%.{limit}s" }}
 {{ if .Annotations.transaction_url }}<a href="{{ .Annotations.transaction_url | html }}">Transaction</a> · {{ end }}{{ if .PanelURL }}<a href="{{ .PanelURL | html }}">Dashboard</a>{{ else if .DashboardURL }}<a href="{{ .DashboardURL | html }}">Dashboard</a>{{ else if .GeneratorURL }}<a href="{{ .GeneratorURL | html }}">Rule</a>{{ end }}
 
 "#;
 
-/// Returns the Telegram message template: at most five firing alerts, then the resolved ones.
+/// Go template for one resolved alert in the Telegram message.
+const TELEGRAM_RESOLVED: &str =
+    "✅ resolved: {{ or .Labels.signal_name .Labels.alertname | html | printf \"%.64s\" }}\n";
+
+/// Returns the Go template for one alert, with the description cut at `description_limit`.
+fn telegram_alert(description_limit: usize) -> String {
+    TELEGRAM_ALERT.replace("{limit}", &description_limit.to_string())
+}
+
+/// Returns the Telegram message template: at most five firing alerts, then at most five resolved ones.
 fn telegram_message() -> String {
+    let single = telegram_alert(TELEGRAM_SINGLE_DESCRIPTION_LIMIT);
+    let grouped = telegram_alert(TELEGRAM_GROUPED_DESCRIPTION_LIMIT);
     [
-        "{{ if gt (len .Alerts.Firing) 5 }}{{ range slice .Alerts.Firing 0 5 }}",
-        TELEGRAM_ALERT,
+        "{{ if eq (len .Alerts.Firing) 1 }}{{ range .Alerts.Firing }}",
+        &single,
+        "{{ end }}",
+        "{{ else if gt (len .Alerts.Firing) 5 }}{{ range slice .Alerts.Firing 0 5 }}",
+        &grouped,
         "{{ end }}… {{ len .Alerts.Firing }} alerts firing, first 5 shown\n",
         "{{ else }}{{ range .Alerts.Firing }}",
-        TELEGRAM_ALERT,
+        &grouped,
         "{{ end }}{{ end }}",
-        "{{ range .Alerts.Resolved }}",
-        "✅ resolved: {{ or .Labels.signal_name .Labels.alertname | html }}\n",
-        "{{ end }}",
+        "{{ if gt (len .Alerts.Resolved) 5 }}{{ range slice .Alerts.Resolved 0 5 }}",
+        TELEGRAM_RESOLVED,
+        "{{ end }}… {{ len .Alerts.Resolved }} alerts resolved, first 5 shown\n",
+        "{{ else }}{{ range .Alerts.Resolved }}",
+        TELEGRAM_RESOLVED,
+        "{{ end }}{{ end }}",
     ]
     .concat()
 }
@@ -1846,11 +1869,54 @@ mod tests {
 
         assert!(!printed.is_empty());
         for action in printed {
-            assert!(
-                action.ends_with("| html"),
+            let mut stages = action.split('|').map(str::trim).skip(1);
+            assert_eq!(
+                stages.next(),
+                Some("html"),
                 "`{action}` reaches Telegram unescaped"
             );
+            assert!(
+                stages.all(|stage| stage.starts_with("printf \"%.")),
+                "`{action}` changes the text after it is escaped"
+            );
         }
+    }
+
+    /// Grafana cuts the message at 4096 characters wherever that falls, and
+    /// Telegram rejects a message cut inside a tag. A cut made after `html`
+    /// cannot split a tag, because the escaped text holds no `<`.
+    #[test]
+    fn the_telegram_message_bounds_every_text_it_prints() {
+        let message = telegram_message();
+        let unbounded = template_actions(&message)
+            .filter(|action| action.ends_with("| html"))
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(
+            unbounded,
+            BTreeSet::from([
+                ".Annotations.transaction_url | html",
+                ".DashboardURL | html",
+                ".GeneratorURL | html",
+                ".PanelURL | html",
+            ]),
+            "only a link address may be printed whole"
+        );
+    }
+
+    #[test]
+    fn a_single_alert_keeps_a_longer_description_than_grouped_alerts() {
+        let message = telegram_message();
+        let (single, grouped) = message
+            .split_once("{{ else if gt (len .Alerts.Firing) 5 }}")
+            .unwrap();
+        let description =
+            |limit: usize| format!(".Annotations.summary | html | printf \"%.{limit}s\" }}}}");
+
+        assert!(single.starts_with("{{ if eq (len .Alerts.Firing) 1 }}"));
+        assert_eq!(single.matches(&description(3000)).count(), 1);
+        assert_eq!(grouped.matches(&description(160)).count(), 2);
+        assert_eq!(message.matches(".Annotations.summary").count(), 3);
     }
 
     #[test]
