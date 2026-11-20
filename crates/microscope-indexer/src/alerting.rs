@@ -737,6 +737,7 @@ fn grafana_rule(
         "description": description,
         "summary": format!("Microscope matched {} {}", alert.kind, alert.name),
         "transaction": format!("{{{{ $labels.signature }}}} {transaction_url}"),
+        "transaction_url": transaction_url,
     });
     // Grafana rejects a rule carrying one of these two without the other.
     if let Some(panel_id) = log_panel_id(alert.kind) {
@@ -920,12 +921,61 @@ fn condition_description(condition: &AlertCondition) -> anyhow::Result<String> {
     ))
 }
 
+/// Longest description, in characters, when the Telegram message holds one alert.
+const TELEGRAM_SINGLE_DESCRIPTION_LIMIT: usize = 3000;
+
+/// Longest description, in characters, of each alert when the Telegram message holds several.
+const TELEGRAM_GROUPED_DESCRIPTION_LIMIT: usize = 160;
+
+/// Go template for one alert in the Telegram message; `{limit}` stands for the description limit.
+const TELEGRAM_ALERT: &str = r#"{{ if eq .Labels.severity "critical" }}🚨{{ else if eq .Labels.severity "error" }}🔴{{ else if eq .Labels.severity "warning" }}🟠{{ else }}🔵{{ end }} <b>{{ if eq .Labels.alertname "DatasourceError" }}DatasourceError: {{ end }}{{ or .Labels.signal_name .Labels.alertname | html | printf "%.64s" }}</b>{{ with .Labels.severity }} · {{ . | html | printf "%.16s" }}{{ end }}
+{{ or .Annotations.Error .Annotations.description .Annotations.summary | html | printf "%.{limit}s" }}
+{{ if .Annotations.transaction_url }}<a href="{{ .Annotations.transaction_url | html }}">Transaction</a> · {{ end }}{{ if .PanelURL }}<a href="{{ .PanelURL | html }}">Dashboard</a>{{ else if .DashboardURL }}<a href="{{ .DashboardURL | html }}">Dashboard</a>{{ else if .GeneratorURL }}<a href="{{ .GeneratorURL | html }}">Rule</a>{{ end }}
+
+"#;
+
+/// Go template for one resolved alert in the Telegram message.
+const TELEGRAM_RESOLVED: &str =
+    "✅ resolved: {{ or .Labels.signal_name .Labels.alertname | html | printf \"%.64s\" }}\n";
+
+/// Returns the Go template for one alert, with the description cut at `description_limit`.
+fn telegram_alert(description_limit: usize) -> String {
+    TELEGRAM_ALERT.replace("{limit}", &description_limit.to_string())
+}
+
+/// Returns the Telegram message template: at most five firing alerts, then at most five resolved ones.
+fn telegram_message() -> String {
+    let single = telegram_alert(TELEGRAM_SINGLE_DESCRIPTION_LIMIT);
+    let grouped = telegram_alert(TELEGRAM_GROUPED_DESCRIPTION_LIMIT);
+    [
+        "{{ if eq (len .Alerts.Firing) 1 }}{{ range .Alerts.Firing }}",
+        &single,
+        "{{ end }}",
+        "{{ else if gt (len .Alerts.Firing) 5 }}{{ range slice .Alerts.Firing 0 5 }}",
+        &grouped,
+        "{{ end }}… {{ len .Alerts.Firing }} alerts firing, first 5 shown\n",
+        "{{ else }}{{ range .Alerts.Firing }}",
+        &grouped,
+        "{{ end }}{{ end }}",
+        "{{ if gt (len .Alerts.Resolved) 5 }}{{ range slice .Alerts.Resolved 0 5 }}",
+        TELEGRAM_RESOLVED,
+        "{{ end }}… {{ len .Alerts.Resolved }} alerts resolved, first 5 shown\n",
+        "{{ else }}{{ range .Alerts.Resolved }}",
+        TELEGRAM_RESOLVED,
+        "{{ end }}{{ end }}",
+    ]
+    .concat()
+}
+
 fn contact_point(channel: AlertChannel, activity: bool) -> Value {
     let settings = match channel {
         AlertChannel::Slack => json!({ "url": "$SLACK_WEBHOOK_URL" }),
         AlertChannel::Telegram => json!({
             "bottoken": "$TELEGRAM_BOT_TOKEN",
             "chatid": "$TELEGRAM_CHAT_ID",
+            "message": telegram_message(),
+            "parse_mode": "HTML",
+            "disable_web_page_preview": true,
         }),
         AlertChannel::Pagerduty => json!({
             "integrationKey": "$PAGERDUTY_INTEGRATION_KEY",
@@ -981,7 +1031,7 @@ mod tests {
 
     use super::{
         add_resource_deletions, deletion_uids, grafana_rule, log_stream_selector_for, logql_query,
-        provisioning_document, rule_uids,
+        provisioning_document, rule_uids, telegram_message,
     };
 
     fn alert(kind: AlertKind, name: &str) -> AlertRule {
@@ -1425,6 +1475,39 @@ mod tests {
     }
 
     #[test]
+    fn activity_alerts_carry_the_explorer_link_on_its_own() {
+        let mut config = config(vec![]);
+        let transaction_url = |config: &Config| {
+            let alert = alert(AlertKind::Event, "created");
+            grafana_rule(config, &alert, Some(AlertChannel::Telegram)).unwrap()["annotations"]
+                ["transaction_url"]
+                .clone()
+        };
+        assert_eq!(
+            transaction_url(&config),
+            "https://explorer.solana.com/tx/{{ $labels.signature }}"
+        );
+
+        config.alerting.explorer_transaction_url =
+            "https://explorer.example/tx/{signature}?cluster=devnet".to_string();
+        assert_eq!(
+            transaction_url(&config),
+            "https://explorer.example/tx/{{ $labels.signature }}?cluster=devnet"
+        );
+    }
+
+    /// Grafana updates a rule in place only while its UID holds, and a Grafana
+    /// Cloud export leaves the rule behind the old UID active.
+    #[test]
+    fn rule_uids_stay_pinned_to_the_alert_identity() {
+        let alert = alert(AlertKind::Event, "created");
+        let rule = grafana_rule(&config(vec![]), &alert, Some(AlertChannel::Telegram)).unwrap();
+        // First 32 hex digits of the SHA-256 of
+        // "<program>\0event\0created\0all\0[]\0warning\0telegram".
+        assert_eq!(rule["uid"], "ms-b0c36b31784b130c356feb6976226009");
+    }
+
+    #[test]
     fn log_backed_alerts_link_to_the_matching_dashboard_panel() {
         let config = config(vec![]);
         let rule = |kind| {
@@ -1709,6 +1792,143 @@ mod tests {
         assert_eq!(activity["uid"], "microscope-telegram-activity");
         assert_eq!(activity["type"], "telegram");
         assert_eq!(activity["settings"], telegram["settings"]);
+    }
+
+    fn contact_point_settings(channel: AlertChannel, name: &str) -> serde_json::Value {
+        let channels = BTreeSet::from([channel]);
+        let document = provisioning_document(&config(vec![]), &channels, false).unwrap();
+        document["contactPoints"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|contact_point| contact_point["name"] == name)
+            .unwrap()["receivers"][0]["settings"]
+            .clone()
+    }
+
+    fn template_actions(message: &str) -> impl Iterator<Item = &str> {
+        message.split("{{").skip(1).map(|rest| {
+            let action = rest.split("}}").next().unwrap();
+            action.trim_matches(|c: char| c == '-' || c.is_whitespace())
+        })
+    }
+
+    fn template_keyword(action: &str) -> &str {
+        action.split_whitespace().next().unwrap()
+    }
+
+    #[test]
+    fn telegram_contact_points_send_the_compact_message_as_html() {
+        for name in ["microscope-telegram", "microscope-telegram-activity"] {
+            let settings = contact_point_settings(AlertChannel::Telegram, name);
+            assert_eq!(settings["bottoken"], "$TELEGRAM_BOT_TOKEN");
+            assert_eq!(settings["chatid"], "$TELEGRAM_CHAT_ID");
+            assert_eq!(settings["parse_mode"], "HTML");
+            assert_eq!(settings["disable_web_page_preview"], true);
+
+            let message = settings["message"].as_str().unwrap();
+            assert!(
+                message.contains("{{ range .Alerts.Firing }}"),
+                "grouped alerts share no annotation, so each one is read on its own"
+            );
+            assert!(message.contains(".Annotations.transaction_url"));
+            assert!(message.contains("{{ range .Alerts.Resolved }}✅ resolved: "));
+        }
+    }
+
+    #[test]
+    fn slack_and_pagerduty_contact_points_keep_their_default_message() {
+        assert_eq!(
+            contact_point_settings(AlertChannel::Slack, "microscope-slack"),
+            serde_json::json!({ "url": "$SLACK_WEBHOOK_URL" })
+        );
+        assert_eq!(
+            contact_point_settings(AlertChannel::Pagerduty, "microscope-pagerduty"),
+            serde_json::json!({
+                "integrationKey": "$PAGERDUTY_INTEGRATION_KEY",
+                "severity": "{{ .CommonLabels.severity }}",
+            })
+        );
+    }
+
+    /// Grafana expands `$NAME` in contact point settings, and operators
+    /// substitute the `$NAME` credentials in a Grafana Cloud export.
+    #[test]
+    fn the_telegram_message_survives_grafana_env_expansion() {
+        assert!(!telegram_message().contains('$'));
+    }
+
+    #[test]
+    fn the_telegram_message_escapes_every_alert_value() {
+        let message = telegram_message();
+        let printed = template_actions(&message)
+            .filter(|action| {
+                !["if", "else", "end", "range", "with", "len"].contains(&template_keyword(action))
+            })
+            .collect::<Vec<_>>();
+
+        assert!(!printed.is_empty());
+        for action in printed {
+            let mut stages = action.split('|').map(str::trim).skip(1);
+            assert_eq!(
+                stages.next(),
+                Some("html"),
+                "`{action}` reaches Telegram unescaped"
+            );
+            assert!(
+                stages.all(|stage| stage.starts_with("printf \"%.")),
+                "`{action}` changes the text after it is escaped"
+            );
+        }
+    }
+
+    /// Grafana cuts the message at 4096 characters wherever that falls, and
+    /// Telegram rejects a message cut inside a tag. A cut made after `html`
+    /// cannot split a tag, because the escaped text holds no `<`.
+    #[test]
+    fn the_telegram_message_bounds_every_text_it_prints() {
+        let message = telegram_message();
+        let unbounded = template_actions(&message)
+            .filter(|action| action.ends_with("| html"))
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(
+            unbounded,
+            BTreeSet::from([
+                ".Annotations.transaction_url | html",
+                ".DashboardURL | html",
+                ".GeneratorURL | html",
+                ".PanelURL | html",
+            ]),
+            "only a link address may be printed whole"
+        );
+    }
+
+    #[test]
+    fn a_single_alert_keeps_a_longer_description_than_grouped_alerts() {
+        let message = telegram_message();
+        let (single, grouped) = message
+            .split_once("{{ else if gt (len .Alerts.Firing) 5 }}")
+            .unwrap();
+        let description =
+            |limit: usize| format!(".Annotations.summary | html | printf \"%.{limit}s\" }}}}");
+
+        assert!(single.starts_with("{{ if eq (len .Alerts.Firing) 1 }}"));
+        assert_eq!(single.matches(&description(3000)).count(), 1);
+        assert_eq!(grouped.matches(&description(160)).count(), 2);
+        assert_eq!(message.matches(".Annotations.summary").count(), 3);
+    }
+
+    #[test]
+    fn the_telegram_message_closes_every_block() {
+        let message = telegram_message();
+        let count = |keyword: &str| {
+            template_actions(&message)
+                .filter(|action| template_keyword(action) == keyword)
+                .count()
+        };
+
+        assert_eq!(count("if") + count("range") + count("with"), count("end"));
     }
 
     #[test]

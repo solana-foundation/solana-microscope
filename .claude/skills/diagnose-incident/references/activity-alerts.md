@@ -14,7 +14,7 @@ An activity alert cannot be interpreted without the config that produced it.
 
 ## What fired
 
-The `transaction` annotation carries the signature and an explorer link, and `signature` is a query label. Pull the record itself from Loki rather than reasoning from the alert text: the alert only proves a match, the record has the decoded `data`.
+The `transaction` annotation carries the signature and an explorer link, `transaction_url` carries the link alone, and `signature` is a query label. Pull the record itself from Loki rather than reasoning from the alert text: the alert only proves a match, the record has the decoded `data`.
 
 `references/investigate.md` has the record shapes and the query transports. For an instruction alert, the record is `kind = "program_instruction"` with the matching `name` and `signature`.
 

@@ -201,6 +201,34 @@ match, with no "resolved" message when the match leaves the lookback window.
 Health alerts still send one when they recover. PagerDuty gets the resolved
 message for both, because it is what closes the incident.
 
+Telegram gets a compact message for each alert:
+
+```text
+🟠 recurring_transfer_event · warning
+Matched event recurring_transfer_event where failed eq false
+Transaction · Dashboard
+```
+
+`Transaction` opens the matched transaction in the explorer. `Dashboard` opens
+the alert's panel in the Grafana dashboard; an alert with no dashboard panel,
+such as an instruction or health alert, links its `Rule` instead. A recovered
+health alert is one `✅ resolved: <signal>` line.
+
+Telegram limits a message to 4096 characters, so one message shows at most
+five alerts and counts the rest, and cuts a description at 3000 characters when
+it holds one alert, or at 160 when it holds several. Link addresses are never
+cut: the limits leave room for two links of 200 characters each, so a longer
+explorer URL or Grafana `root_url` reduces that margin.
+
+The Grafana links start with Grafana's `root_url`, which is
+`http://localhost:3000/` in the local stack, and Telegram shows a `localhost`
+link as plain text; set `GF_SERVER_ROOT_URL` on the `grafana` service to get
+working links.
+
+Event, instruction and multisig alerts carry the explorer link alone in a
+`transaction_url` annotation, for notification templates of your own. The
+`transaction` annotation still holds the signature followed by that link.
+
 See [`microscope.toml.example`](microscope.toml.example) for all options.
 
 ## Datasource modes
@@ -539,7 +567,8 @@ Contact-point JSON keeps `$SLACK_WEBHOOK_URL`-style placeholders; substitute
 real secrets only at push time, never in the committed files. Slack and
 Telegram export two contact points each: `<deployment>-<channel>` for health
 alerts and `<deployment>-<channel>-activity`, which sends no resolved message,
-for activity alerts.
+for activity alerts. The Telegram contact points carry the message template in
+`settings.message`, so push them again after an upgrade that changes it.
 
 Pushing only creates and updates. Rules and contact points that disappear from
 an export stay active in the tenant, and because rule UIDs are content-derived,
