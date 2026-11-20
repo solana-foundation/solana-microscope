@@ -737,6 +737,7 @@ fn grafana_rule(
         "description": description,
         "summary": format!("Microscope matched {} {}", alert.kind, alert.name),
         "transaction": format!("{{{{ $labels.signature }}}} {transaction_url}"),
+        "transaction_url": transaction_url,
     });
     // Grafana rejects a rule carrying one of these two without the other.
     if let Some(panel_id) = log_panel_id(alert.kind) {
@@ -1422,6 +1423,39 @@ mod tests {
             rule["annotations"]["transaction"],
             "{{ $labels.signature }} https://explorer.solana.com/tx/{{ $labels.signature }}"
         );
+    }
+
+    #[test]
+    fn activity_alerts_carry_the_explorer_link_on_its_own() {
+        let mut config = config(vec![]);
+        let transaction_url = |config: &Config| {
+            let alert = alert(AlertKind::Event, "created");
+            grafana_rule(config, &alert, Some(AlertChannel::Telegram)).unwrap()["annotations"]
+                ["transaction_url"]
+                .clone()
+        };
+        assert_eq!(
+            transaction_url(&config),
+            "https://explorer.solana.com/tx/{{ $labels.signature }}"
+        );
+
+        config.alerting.explorer_transaction_url =
+            "https://explorer.example/tx/{signature}?cluster=devnet".to_string();
+        assert_eq!(
+            transaction_url(&config),
+            "https://explorer.example/tx/{{ $labels.signature }}?cluster=devnet"
+        );
+    }
+
+    /// Grafana updates a rule in place only while its UID holds, and a Grafana
+    /// Cloud export leaves the rule behind the old UID active.
+    #[test]
+    fn rule_uids_stay_pinned_to_the_alert_identity() {
+        let alert = alert(AlertKind::Event, "created");
+        let rule = grafana_rule(&config(vec![]), &alert, Some(AlertChannel::Telegram)).unwrap();
+        // First 32 hex digits of the SHA-256 of
+        // "<program>\0event\0created\0all\0[]\0warning\0telegram".
+        assert_eq!(rule["uid"], "ms-b0c36b31784b130c356feb6976226009");
     }
 
     #[test]

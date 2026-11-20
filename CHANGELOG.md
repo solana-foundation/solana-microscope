@@ -14,6 +14,9 @@ version and the section heading below.
   metrics exporter and the health probes listen on, for example
   `127.0.0.1:9090` on a host without Docker. Unset, they stay `0.0.0.0:9090`
   and `0.0.0.0:9091`; a value that does not parse stops startup.
+- Event, instruction and multisig alerts carry a `transaction_url` annotation
+  holding the explorer link alone, for notification templates. `transaction`
+  is unchanged.
 
 ### Fixed
 

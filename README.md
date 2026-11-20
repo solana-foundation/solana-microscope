@@ -201,6 +201,10 @@ match, with no "resolved" message when the match leaves the lookback window.
 Health alerts still send one when they recover. PagerDuty gets the resolved
 message for both, because it is what closes the incident.
 
+Event, instruction and multisig alerts carry the explorer link alone in a
+`transaction_url` annotation, for notification templates of your own. The
+`transaction` annotation still holds the signature followed by that link.
+
 See [`microscope.toml.example`](microscope.toml.example) for all options.
 
 ## Datasource modes
