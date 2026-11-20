@@ -14,6 +14,13 @@ version and the section heading below.
   metrics exporter and the health probes listen on, for example
   `127.0.0.1:9090` on a host without Docker. Unset, they stay `0.0.0.0:9090`
   and `0.0.0.0:9091`; a value that does not parse stops startup.
+- Telegram alerts arrive as a compact message: a severity icon, the signal
+  name, the severity, the description, and one link each to the transaction
+  and to its dashboard panel, or to the rule when the alert has no panel.
+  A recovered health alert is one `✅ resolved: <signal>` line. A message shows
+  at most five alerts and counts the rest, so a burst stays inside Telegram's
+  4096-character limit. Slack and PagerDuty are unchanged. On Grafana Cloud,
+  push the Telegram contact points again to get the message.
 - Event, instruction and multisig alerts carry a `transaction_url` annotation
   holding the explorer link alone, for notification templates. `transaction`
   is unchanged.
@@ -34,6 +41,10 @@ version and the section heading below.
   dashboard or a contact point UID would exceed Grafana's 40-character limit.
   The dashboard UID alone caps deployment names at 29 characters; with
   `-telegram-activity`, names longer than 22 characters hit it.
+- A Telegram alert whose description has `<` in it, for example from a
+  condition on the value `"<memo>"`, no longer fails to arrive. Grafana's
+  default message did not escape it and Telegram rejected the message; the
+  compact message escapes every value.
 
 ## [0.1.0] — 2026-09-14
 

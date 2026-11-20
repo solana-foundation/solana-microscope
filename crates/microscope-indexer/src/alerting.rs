@@ -921,12 +921,38 @@ fn condition_description(condition: &AlertCondition) -> anyhow::Result<String> {
     ))
 }
 
+/// Go template for one alert in the Telegram message.
+const TELEGRAM_ALERT: &str = r#"{{ if eq .Labels.severity "critical" }}🚨{{ else if eq .Labels.severity "error" }}🔴{{ else if eq .Labels.severity "warning" }}🟠{{ else }}🔵{{ end }} <b>{{ if eq .Labels.alertname "DatasourceError" }}DatasourceError: {{ end }}{{ or .Labels.signal_name .Labels.alertname | html }}</b>{{ with .Labels.severity }} · {{ . | html }}{{ end }}
+{{ or .Annotations.Error .Annotations.description .Annotations.summary | html }}
+{{ if .Annotations.transaction_url }}<a href="{{ .Annotations.transaction_url | html }}">Transaction</a> · {{ end }}{{ if .PanelURL }}<a href="{{ .PanelURL | html }}">Dashboard</a>{{ else if .DashboardURL }}<a href="{{ .DashboardURL | html }}">Dashboard</a>{{ else if .GeneratorURL }}<a href="{{ .GeneratorURL | html }}">Rule</a>{{ end }}
+
+"#;
+
+/// Returns the Telegram message template: at most five firing alerts, then the resolved ones.
+fn telegram_message() -> String {
+    [
+        "{{ if gt (len .Alerts.Firing) 5 }}{{ range slice .Alerts.Firing 0 5 }}",
+        TELEGRAM_ALERT,
+        "{{ end }}… {{ len .Alerts.Firing }} alerts firing, first 5 shown\n",
+        "{{ else }}{{ range .Alerts.Firing }}",
+        TELEGRAM_ALERT,
+        "{{ end }}{{ end }}",
+        "{{ range .Alerts.Resolved }}",
+        "✅ resolved: {{ or .Labels.signal_name .Labels.alertname | html }}\n",
+        "{{ end }}",
+    ]
+    .concat()
+}
+
 fn contact_point(channel: AlertChannel, activity: bool) -> Value {
     let settings = match channel {
         AlertChannel::Slack => json!({ "url": "$SLACK_WEBHOOK_URL" }),
         AlertChannel::Telegram => json!({
             "bottoken": "$TELEGRAM_BOT_TOKEN",
             "chatid": "$TELEGRAM_CHAT_ID",
+            "message": telegram_message(),
+            "parse_mode": "HTML",
+            "disable_web_page_preview": true,
         }),
         AlertChannel::Pagerduty => json!({
             "integrationKey": "$PAGERDUTY_INTEGRATION_KEY",
@@ -982,7 +1008,7 @@ mod tests {
 
     use super::{
         add_resource_deletions, deletion_uids, grafana_rule, log_stream_selector_for, logql_query,
-        provisioning_document, rule_uids,
+        provisioning_document, rule_uids, telegram_message,
     };
 
     fn alert(kind: AlertKind, name: &str) -> AlertRule {
@@ -1743,6 +1769,100 @@ mod tests {
         assert_eq!(activity["uid"], "microscope-telegram-activity");
         assert_eq!(activity["type"], "telegram");
         assert_eq!(activity["settings"], telegram["settings"]);
+    }
+
+    fn contact_point_settings(channel: AlertChannel, name: &str) -> serde_json::Value {
+        let channels = BTreeSet::from([channel]);
+        let document = provisioning_document(&config(vec![]), &channels, false).unwrap();
+        document["contactPoints"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|contact_point| contact_point["name"] == name)
+            .unwrap()["receivers"][0]["settings"]
+            .clone()
+    }
+
+    fn template_actions(message: &str) -> impl Iterator<Item = &str> {
+        message.split("{{").skip(1).map(|rest| {
+            let action = rest.split("}}").next().unwrap();
+            action.trim_matches(|c: char| c == '-' || c.is_whitespace())
+        })
+    }
+
+    fn template_keyword(action: &str) -> &str {
+        action.split_whitespace().next().unwrap()
+    }
+
+    #[test]
+    fn telegram_contact_points_send_the_compact_message_as_html() {
+        for name in ["microscope-telegram", "microscope-telegram-activity"] {
+            let settings = contact_point_settings(AlertChannel::Telegram, name);
+            assert_eq!(settings["bottoken"], "$TELEGRAM_BOT_TOKEN");
+            assert_eq!(settings["chatid"], "$TELEGRAM_CHAT_ID");
+            assert_eq!(settings["parse_mode"], "HTML");
+            assert_eq!(settings["disable_web_page_preview"], true);
+
+            let message = settings["message"].as_str().unwrap();
+            assert!(
+                message.contains("{{ range .Alerts.Firing }}"),
+                "grouped alerts share no annotation, so each one is read on its own"
+            );
+            assert!(message.contains(".Annotations.transaction_url"));
+            assert!(message.contains("{{ range .Alerts.Resolved }}✅ resolved: "));
+        }
+    }
+
+    #[test]
+    fn slack_and_pagerduty_contact_points_keep_their_default_message() {
+        assert_eq!(
+            contact_point_settings(AlertChannel::Slack, "microscope-slack"),
+            serde_json::json!({ "url": "$SLACK_WEBHOOK_URL" })
+        );
+        assert_eq!(
+            contact_point_settings(AlertChannel::Pagerduty, "microscope-pagerduty"),
+            serde_json::json!({
+                "integrationKey": "$PAGERDUTY_INTEGRATION_KEY",
+                "severity": "{{ .CommonLabels.severity }}",
+            })
+        );
+    }
+
+    /// Grafana expands `$NAME` in contact point settings, and operators
+    /// substitute the `$NAME` credentials in a Grafana Cloud export.
+    #[test]
+    fn the_telegram_message_survives_grafana_env_expansion() {
+        assert!(!telegram_message().contains('$'));
+    }
+
+    #[test]
+    fn the_telegram_message_escapes_every_alert_value() {
+        let message = telegram_message();
+        let printed = template_actions(&message)
+            .filter(|action| {
+                !["if", "else", "end", "range", "with", "len"].contains(&template_keyword(action))
+            })
+            .collect::<Vec<_>>();
+
+        assert!(!printed.is_empty());
+        for action in printed {
+            assert!(
+                action.ends_with("| html"),
+                "`{action}` reaches Telegram unescaped"
+            );
+        }
+    }
+
+    #[test]
+    fn the_telegram_message_closes_every_block() {
+        let message = telegram_message();
+        let count = |keyword: &str| {
+            template_actions(&message)
+                .filter(|action| template_keyword(action) == keyword)
+                .count()
+        };
+
+        assert_eq!(count("if") + count("range") + count("with"), count("end"));
     }
 
     #[test]
