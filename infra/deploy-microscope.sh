@@ -252,7 +252,10 @@ jq --raw-output '
   def dotenv: @json | gsub("\\$"; "$$");
   "GEYSER_URL=" + ((.geyser_url // "") | dotenv),
   "GEYSER_X_TOKEN=" + ((.geyser_x_token // "") | dotenv),
+  "GEYSER_FALLBACK_URLS=" + ((.geyser_fallback_urls // "") | dotenv),
+  "GEYSER_FALLBACK_X_TOKENS=" + ((.geyser_fallback_x_tokens // "") | dotenv),
   "RPC_URL=" + ((.rpc_url // "") | dotenv),
+  "RPC_FALLBACK_URLS=" + ((.rpc_fallback_urls // "") | dotenv),
   "MICROSCOPE_STREAM_STALE_AFTER_SECONDS=" + ((.stream_stale_after_seconds // "") | tostring | dotenv),
   "GRAFANA_ADMIN_PASSWORD=" + (((.grafana_admin_password // "") | if . == "" then "unused-in-grafana-cloud-mode" else . end) | dotenv),
   "SLACK_WEBHOOK_URL=" + ((.slack_webhook_url // "") | dotenv),

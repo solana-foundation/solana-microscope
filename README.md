@@ -215,6 +215,42 @@ the replay repeats. A disconnect therefore costs nothing as long as the outage
 fits inside the retry budget and the provider still serves the slot being
 replayed from, which is why the replay depth your provider offers matters.
 
+A provider outage is not a disconnect: the stream retries the same dead
+endpoint forever. To survive one, list endpoints from other providers in
+`GEYSER_FALLBACK_URLS`, comma-separated in priority order, with their tokens in
+`GEYSER_FALLBACK_X_TOKENS` matched by position (leave an entry empty for an
+endpoint without a token). The indexer probes the endpoint in use and
+any it would return to every 15 seconds, and a healthy fallback it is not using
+every five minutes, until the endpoint in use starts failing. It moves the stream
+to the first healthy one after the current endpoint fails its probe for a
+minute, and returns to a higher-priority endpoint once it has been healthy for
+five minutes. An endpoint that fails again right after a return waits twice as
+long each time, up to an hour. A switch opens the new stream before closing the
+old one and the pipeline deduplicates the overlap, so returning to a recovered
+primary loses nothing; leaving a dead endpoint resubscribes at the new
+endpoint's head, so that gap is RPC recovery's to fill, and `RPC_URL` should
+point at a different provider than `GEYSER_URL` or one outage takes out both.
+Metrics carry an `endpoint` label with the host alone, never the URL's path or
+query, and `microscope_yellowstone_active_endpoint` names the endpoint in use.
+The `yellowstone_endpoint_degraded` alert warns when one endpoint fails its
+probe while another passes, so a fallback with a wrong token shows up before
+the failover that needs it.
+
+`RPC_FALLBACK_URLS` does the same for the poller, in RPC mode and for gap
+recovery: comma-separated endpoints in priority order, used after `RPC_URL`
+fails polls for a minute (a healthy fallback is otherwise probed every five
+minutes) and left once `RPC_URL` has answered probes for five
+minutes, with the same doubling wait for an endpoint that keeps failing after
+each return. The cursors carry over, so a switch loses nothing. A fallback is
+only used once it reports the same genesis hash as the endpoint the checkpoint
+was written against, so an endpoint on another cluster is never polled; until a
+checkpoint exists only `RPC_URL` can name the cluster, so a first start waits
+for it. An endpoint whose history no longer reaches the checkpoint is given up
+on until the indexer restarts, and recovery disables itself only once every
+endpoint has been. `microscope_rpc_active_endpoint` names the endpoint in use,
+and the `rpc_endpoint_degraded` alert warns when one endpoint is unusable while
+another works. Backfill always uses `RPC_URL` or `--rpc-url`.
+
 `RPC_URL` is still worth setting. Recovery inside the stream lives in the
 process, so it covers disconnects but never restarts, outages longer than the
 retry budget, history past the provider's replay window, or undecodable
@@ -338,19 +374,22 @@ succeed. A poller failing only a share of its polls stays ready, since the
 successful ones keep the window fresh; the generated poll-failure alert covers
 that case.
 
-In Yellowstone mode the indexer calls `GetVersion` on the geyser endpoint every
-15 seconds, using the same `GEYSER_URL` and `GEYSER_X_TOKEN` as the
-subscription, and reports unready once that call has been failing for
+In Yellowstone mode the indexer opens a short-lived subscription on the geyser
+endpoint in use every 15 seconds, using the same URL and token as the stream
+but no filters, so the endpoint sends pings and no transactions. It reports
+unready once that has been failing on every endpoint for
 `MICROSCOPE_STREAM_STALE_AFTER_SECONDS`, 90 seconds by default. A rejected
-token, an unresolvable host or a dead endpoint fails the probe; a single blip
+token, an unresolvable host, a dead endpoint or one that refuses to stream (a
+quota, a plan without streaming) fails the probe; a single blip
 does not, because the window is measured from the last success and six attempts
 fit inside it. Set 0 to leave readiness blind to the endpoint. Probe failures
 are also exported as `microscope_yellowstone_probe_healthy` and
 `microscope_yellowstone_probe_failures_total`.
 
-The probe proves the endpoint and the token are healthy, not that our own
-subscription is still being served: a stream wedged against a healthy endpoint
-still reports ready. The generated `yellowstone_stream_interrupted` alert covers
+The probe is a second subscription next to the stream, so the provider plan
+must allow two concurrent streams per endpoint. It proves the endpoint accepts
+a subscription, not that our own stream is still being served: a stream wedged
+against a healthy endpoint still reports ready. The generated `yellowstone_stream_interrupted` alert covers
 that case, once the interruptions are sustained: the datasource logs one timeout
 per `STREAM_TIMEOUT`, so the rule counts them over 15 minutes and fires above
 five, leaving the single reconnect the client replays silent.

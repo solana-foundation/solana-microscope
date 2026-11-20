@@ -52,7 +52,10 @@ metadata:
 stringData:
   GEYSER_URL: https://your-yellowstone-endpoint:443
   GEYSER_X_TOKEN: ""
+  GEYSER_FALLBACK_URLS: ""
+  GEYSER_FALLBACK_X_TOKENS: ""
   RPC_URL: https://your-solana-rpc-endpoint
+  RPC_FALLBACK_URLS: ""
 ```
 
 `idl_path` resolves relative to the config file, so `idl/<YOUR_IDL>.json` finds
@@ -136,9 +139,9 @@ whenever `RPC_URL` is set, in RPC mode and for Yellowstone gap recovery.
 `.microscope-state` relative to the working directory.
 
 In Yellowstone mode `/readyz` reports unready once the geyser endpoint has
-failed an unary `GetVersion` probe continuously for
+refused a short-lived probe subscription continuously for
 `MICROSCOPE_STREAM_STALE_AFTER_SECONDS` (90 by default), which catches a
-rejected token or an endpoint that is gone. It does not catch a subscription
+rejected token, an endpoint that is gone or one that refuses to stream. It does not catch a subscription
 wedged against a healthy endpoint, so a probe-only setup misses that case; the
 generated `yellowstone_stream_interrupted` alert is the signal there, once more
 than five interruptions land in 15 minutes. See

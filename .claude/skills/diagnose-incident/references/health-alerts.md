@@ -7,8 +7,8 @@ Generated for every deployment, independent of the monitored program, so these a
 | Condition | Alerts |
 |-----------|--------|
 | Always | `rpc_recovery_disabled`, `rpc_checkpoint_corrupt`, `datasource_updates_dropped`, `log_delivery_stalled` |
-| `datasource.mode = "yellowstone"` | `yellowstone_endpoint_unreachable`, `yellowstone_stream_interrupted`, `yellowstone_gap_unrecovered` |
-| `RPC_URL` set, or `mode = "rpc"` | `rpc_poll_stale`, `rpc_poll_lag`, `rpc_poll_failing`, `rpc_checkpoint_stale`, `rpc_transaction_quarantined` |
+| `datasource.mode = "yellowstone"` | `yellowstone_endpoint_unreachable`, `yellowstone_stream_interrupted`, `yellowstone_gap_unrecovered`, `yellowstone_fallback_active`, `yellowstone_endpoint_degraded` |
+| `RPC_URL` set, or `mode = "rpc"` | `rpc_poll_stale`, `rpc_poll_lag`, `rpc_poll_failing`, `rpc_checkpoint_stale`, `rpc_transaction_quarantined`, `rpc_fallback_active`, `rpc_endpoint_degraded` |
 | `[multisig]` configured | `multisig_unmatched_state` |
 
 Only a deployment meeting every condition at once has all of them, and Grafana shows more rules than signals, because each signal generates one rule per notification channel. An operator asking why they never see one of these has probably not met its condition; check the deployment before treating absence as a bug. `microscope.toml` is safe to read. `.env` is not: every variable in it except `MICROSCOPE_DEPLOYMENT` and `MICROSCOPE_ENV` is a credential. The conditions only need to know which variables are set, so read the names alone:
@@ -42,13 +42,16 @@ Step 4 of the procedure requires an explicit answer. Classify by alert:
 |-------|-------------------|
 | `yellowstone_endpoint_unreachable` | Everything for the duration, unless `RPC_URL` is set and the poller is healthy |
 | `yellowstone_stream_interrupted` | The intervals between interruptions, unless `RPC_URL` is set. Fires only on repeated interruptions in one window: a wedged stream, not a single reconnect, which the fork replays silently |
-| `yellowstone_gap_unrecovered` | Yes, permanently. `microscope_yellowstone_missed_slots_total` gives the size. Backfill the interval |
+| `yellowstone_gap_unrecovered` | Yes, permanently. `microscope_yellowstone_missed_slots_total` gives the size of a reconnect gap; a failover gap is unsized, so backfill from the switch logged as "switching the Yellowstone stream" |
+| `yellowstone_fallback_active` | No, if `RPC_URL` is set and healthy: it replays the gap the switch left. The primary provider is down; check its status page before anything else |
 | `datasource_updates_dropped` | The dropped transaction, permanently, unless `RPC_URL` re-delivers it inside the replay window |
 | `rpc_recovery_disabled` | Nothing yet in Yellowstone mode, but the next disconnect is unrecoverable. Everything, in RPC mode |
 | `rpc_checkpoint_corrupt` | The window the lost checkpoint covered. Recovery restarted from a fresh replay window; backfill that period |
 | `rpc_transaction_quarantined` | One transaction per quarantined signature, with no record. The signatures are in the indexer log at error level |
 | `log_delivery_stalled` | The records exist in the container log. Alloy retries from its own WAL, so a short Loki outage self-heals and a long one loses the window; re-index it with backfill |
 | `rpc_poll_stale`, `rpc_poll_failing`, `rpc_poll_lag` | Not directly. Gap recovery is degraded, so an outage overlapping this becomes loss |
+| `rpc_fallback_active` | No. The cursors carry over to the fallback. The primary RPC provider is down, or cannot serve the checkpoint; check its status page and the indexer log |
+| `yellowstone_endpoint_degraded`, `rpc_endpoint_degraded` | No. Another endpoint is working. The redundancy is gone: the `endpoint` label at 0 on `microscope_yellowstone_probe_healthy` or `microscope_rpc_endpoint_healthy` names the one to fix, usually a wrong fallback URL or token when it fires from the start |
 | `rpc_checkpoint_stale` | Not while running. A restart resumes from a stale cursor and re-fetches or misses the uncheckpointed window |
 | `multisig_unmatched_state` | No. This is a configuration fault: nothing was recorded for the configured vault because the config names the wrong account |
 | `DatasourceError` | No. Grafana failed to query, the indexer kept indexing. Every rule whose query failed was blind for the duration, `log_delivery_stalled` included, so confirm the indexer's own metrics and the Loki records for that window |
@@ -62,7 +65,7 @@ Step 4 of the procedure requires an explicit answer. Classify by alert:
 | `rpc_transaction_quarantined`, `rpc_checkpoint_corrupt` | Clearing a quarantine alert |
 | `rpc_recovery_disabled` | RPC recovery disabled itself |
 | `multisig_unmatched_state` | Finding the Squads state address |
-| `yellowstone_endpoint_unreachable`, `yellowstone_stream_interrupted` | Datasource endpoints |
+| `yellowstone_endpoint_unreachable`, `yellowstone_stream_interrupted`, `yellowstone_fallback_active`, `yellowstone_endpoint_degraded`, `rpc_endpoint_degraded` | Datasource endpoints |
 | Any alert the operator says never fires | An alert never fires |
 | Any alert Grafana is still evaluating after a config change | Grafana still evaluates the old alerts |
 | `DatasourceError` | A `DatasourceError` alert fires |
