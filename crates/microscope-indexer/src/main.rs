@@ -435,7 +435,9 @@ mod tests {
     };
     use solana_pubkey::Pubkey;
 
-    use super::{deduplication_filters, with_instruction_pipes, MultisigVersion, VerifiedMultisig};
+    use super::{
+        deduplication_filters, programs, with_instruction_pipes, MultisigVersion, VerifiedMultisig,
+    };
 
     fn redelivered_instruction() -> NestedInstruction {
         let (signature, fetched) = crate::test_support::squads_v4_vault_execute();
@@ -528,7 +530,10 @@ mod tests {
         ] {
             let builder = with_instruction_pipes(Pipeline::builder(), &[multisig(version)]);
 
-            assert_eq!(builder.instruction_pipes.len(), 2);
+            assert_eq!(
+                builder.instruction_pipes.len(),
+                programs::compiled().len() + 1
+            );
         }
     }
 
@@ -539,7 +544,7 @@ mod tests {
             with_instruction_pipes(Pipeline::builder(), &same_version)
                 .instruction_pipes
                 .len(),
-            2
+            programs::compiled().len() + 1
         );
 
         let mixed = [
@@ -551,7 +556,7 @@ mod tests {
             with_instruction_pipes(Pipeline::builder(), &mixed)
                 .instruction_pipes
                 .len(),
-            3
+            programs::compiled().len() + 2
         );
     }
 
