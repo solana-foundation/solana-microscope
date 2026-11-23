@@ -55,12 +55,11 @@ version and the section heading below.
 
 ### Fixed
 
-- With `MICROSCOPE_DEPLOYMENT` set, generated health alerts on Prometheus
-  metrics and event, instruction and multisig alerts now select only that
-  deployment's series, as the log-based health alerts already did. On a
-  Grafana Cloud stack shared by several deployments they used to count every
-  deployment's metrics and logs, so one deployment's healthy series could hide
-  another's outage. Unset, the queries are unchanged.
+- `scripts/export-grafana-cloud.sh` merges the deployment into a series'
+  existing label matchers instead of adding a second selector. The
+  `yellowstone_fallback_active` and `rpc_fallback_active` rules were exported
+  as invalid PromQL such as
+  `microscope_rpc_active_endpoint{deployment="x"}{role="fallback"}`.
 - The AWS module gzip-compresses the VM's user data. Uncompressed, the
   bootstrap with its embedded reconciler was larger than the 16 KB EC2 accepts.
 - Event, instruction and multisig alerts on Slack and Telegram no longer send

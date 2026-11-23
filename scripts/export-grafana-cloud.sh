@@ -103,10 +103,8 @@ def scope_exprs($deployment):
   walk(
     if type == "object" and (.expr? | type) == "string" then
       .expr |= (
-        gsub("(?<metric>microscope_[a-zA-Z0-9_]+)";
-             "\(.metric){deployment=\"\($deployment)\"}")
-        | gsub("(?<metric>loki_write_[a-zA-Z0-9_]+)";
-               "\(.metric){deployment=\"\($deployment)\"}")
+        gsub("(?<metric>(microscope|loki_write)_[a-zA-Z0-9_]+)(\\{(?<matchers>[^}]*)\\})?";
+             "\(.metric){deployment=\"\($deployment)\"\(if .matchers then ", " + .matchers else "" end)}")
         | gsub("up\\{job=\"microscope-indexer\"\\}";
                "up{job=\"microscope-indexer\", deployment=\"\($deployment)\"}")
         | gsub("\\{service_name=\"microscope-indexer\"\\}";
