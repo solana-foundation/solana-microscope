@@ -3,9 +3,10 @@ use std::io::Read;
 use carbon_core::{
     borsh::BorshDeserialize, deserialize::CarbonDeserialize, instruction::InstructionMetadata,
 };
-use carbon_program_decoder::instructions::CpiEvent;
 use heck::ToSnakeCase;
 use serde_json::Value;
+
+use crate::programs::Program;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EventSource {
@@ -35,7 +36,7 @@ pub struct DecodedLogs {
     pub rejected: usize,
 }
 
-pub fn decode_logs(metadata: &InstructionMetadata) -> DecodedLogs {
+pub fn decode_logs<P: Program>(metadata: &InstructionMetadata) -> DecodedLogs {
     let mut decoded = DecodedLogs::default();
     for raw in runtime_logs_only(metadata).decode_log_events::<RawEventData>() {
         const EVENT_CPI_PREFIX: &[u8] = &[228, 69, 165, 46, 81, 203, 154, 29];
@@ -43,8 +44,8 @@ pub fn decode_logs(metadata: &InstructionMetadata) -> DecodedLogs {
         instruction_data.extend_from_slice(EVENT_CPI_PREFIX);
         instruction_data.extend_from_slice(&raw.0);
 
-        match CpiEvent::decode(&instruction_data)
-            .and_then(|event| to_log_data(&event, EventSource::Log))
+        match P::decode_event(&instruction_data)
+            .and_then(|event| to_log_data(event, EventSource::Log))
         {
             Some(event) => decoded.events.push(event),
             None => decoded.rejected += 1,
@@ -89,7 +90,7 @@ fn is_program_emitted(line: &str) -> bool {
 /// would attribute the event to the synthetic `cpi_event` name. Collect them
 /// from the emitting instruction's children instead, where the operation name
 /// is the one the operator configured alerts against.
-pub fn decode_child_events(
+pub fn decode_child_events<P: Program>(
     children: &carbon_core::instruction::NestedInstructions,
     program_id: &solana_pubkey::Pubkey,
 ) -> DecodedLogs {
@@ -98,10 +99,10 @@ pub fn decode_child_events(
         if child.instruction.program_id != *program_id {
             continue;
         }
-        let Some(event) = CpiEvent::decode(&child.instruction.data) else {
+        let Some(event) = P::decode_event(&child.instruction.data) else {
             continue;
         };
-        match to_log_data(&event, EventSource::Cpi) {
+        match to_log_data(event, EventSource::Cpi) {
             Some(event) => decoded.events.push(event),
             None => decoded.rejected += 1,
         }
@@ -109,8 +110,8 @@ pub fn decode_child_events(
     decoded
 }
 
-fn to_log_data(event: &CpiEvent, source: EventSource) -> Option<DecodedEvent> {
-    let serialized = serde_json::to_value(event).ok()?;
+fn to_log_data(event: serde_json::Result<Value>, source: EventSource) -> Option<DecodedEvent> {
+    let serialized = event.ok()?;
     let (name, data) = serialized.as_object()?.iter().next()?;
     Some(DecodedEvent {
         name: name.to_snake_case(),
@@ -137,16 +138,14 @@ impl CarbonDeserialize for RawEventData {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, program_events))]
 mod tests {
     use std::sync::Arc;
 
     use base64::{engine::general_purpose::STANDARD, Engine as _};
     use carbon_core::{instruction::InstructionMetadata, transaction::TransactionMetadata};
-    use carbon_program_decoder::PROGRAM_ID;
+    use microscope_programs::p0::{CpiEvent, Decoder as FirstProgram, PROGRAM_ID};
     use solana_pubkey::Pubkey;
-
-    use carbon_program_decoder::instructions::CpiEvent;
 
     use super::{decode_logs, to_log_data, EventSource};
 
@@ -192,7 +191,7 @@ mod tests {
             format!("Program {PROGRAM_ID} success"),
         ]);
 
-        let events = decode_logs(&metadata).events;
+        let events = decode_logs::<FirstProgram>(&metadata).events;
 
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].name, "subscription_created_event");
@@ -218,7 +217,7 @@ mod tests {
             format!("Program {PROGRAM_ID} success"),
         ]);
 
-        let events = decode_logs(&metadata).events;
+        let events = decode_logs::<FirstProgram>(&metadata).events;
 
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].data["created_ts"], 1_700_000_000_i64);
@@ -235,7 +234,7 @@ mod tests {
             format!("Program {PROGRAM_ID} success"),
         ]);
 
-        assert!(decode_logs(&metadata).events.is_empty());
+        assert!(decode_logs::<FirstProgram>(&metadata).events.is_empty());
     }
 
     #[test]
@@ -249,7 +248,7 @@ mod tests {
             format!("Program {PROGRAM_ID} success"),
         ]);
 
-        assert!(decode_logs(&metadata).events.is_empty());
+        assert!(decode_logs::<FirstProgram>(&metadata).events.is_empty());
     }
 
     #[test]
@@ -269,7 +268,7 @@ mod tests {
             vec![1],
         );
 
-        let events = decode_logs(&metadata).events;
+        let events = decode_logs::<FirstProgram>(&metadata).events;
 
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].data["created_ts"], 1_700_000_000_i64);
@@ -287,7 +286,7 @@ mod tests {
             format!("Program {PROGRAM_ID} success"),
         ]);
 
-        let decoded = decode_logs(&metadata);
+        let decoded = decode_logs::<FirstProgram>(&metadata);
 
         assert!(decoded.events.is_empty());
         assert_eq!(decoded.rejected, 2);
@@ -320,7 +319,7 @@ mod tests {
             child_instruction(PROGRAM_ID, event_data),
         ]);
 
-        let decoded = super::decode_child_events(&children, &PROGRAM_ID);
+        let decoded = super::decode_child_events::<FirstProgram>(&children, &PROGRAM_ID);
 
         assert_eq!(decoded.events.len(), 1);
         assert_eq!(decoded.events[0].name, "subscription_created_event");
@@ -334,7 +333,7 @@ mod tests {
             vec![7; 32],
         )]);
 
-        let decoded = super::decode_child_events(&children, &PROGRAM_ID);
+        let decoded = super::decode_child_events::<FirstProgram>(&children, &PROGRAM_ID);
 
         assert!(decoded.events.is_empty());
         assert_eq!(decoded.rejected, 0);
@@ -349,7 +348,8 @@ mod tests {
         .concat();
 
         let event = CpiEvent::decode(&instruction_data).expect("generated event decodes");
-        let event = to_log_data(&event, EventSource::Cpi).expect("generated event serializes");
+        let event = to_log_data(serde_json::to_value(&event), EventSource::Cpi)
+            .expect("generated event serializes");
 
         assert_eq!(event.name, "subscription_created_event");
         assert_eq!(event.source, EventSource::Cpi);

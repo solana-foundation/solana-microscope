@@ -196,6 +196,8 @@ pub struct AlertRule {
     pub lookback_window_seconds: Option<u64>,
     #[serde(default)]
     pub evaluation_interval_seconds: Option<u64>,
+    #[serde(default)]
+    pub program_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -386,11 +388,35 @@ impl DatasourceConfig {
     }
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProgramConfig {
+    pub program_id: String,
+    pub idl_path: String,
+}
+
+impl ProgramConfig {
+    pub fn pubkey(&self) -> Pubkey {
+        Pubkey::from_str(&self.program_id).expect("program_id is validated while loading config")
+    }
+
+    pub fn resolved_idl_path(&self, config_path: &Path) -> PathBuf {
+        config_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(&self.idl_path)
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
-    pub program_id: String,
-    pub idl_path: String,
+    #[serde(default)]
+    program_id: Option<String>,
+    #[serde(default)]
+    idl_path: Option<String>,
+    #[serde(default)]
+    pub programs: Vec<ProgramConfig>,
     #[serde(
         default,
         rename = "multisig",
@@ -411,22 +437,63 @@ impl Config {
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         let raw = std::fs::read_to_string(path)
             .with_context(|| format!("reading config file {}", path.display()))?;
-        let config: Self = toml::from_str(&raw)
-            .with_context(|| format!("parsing config file {}", path.display()))?;
+        let config =
+            Self::parse(&raw).with_context(|| format!("parsing config file {}", path.display()))?;
         config.validate(path)?;
         Ok(config)
     }
 
-    pub fn resolved_idl_path(&self, config_path: &Path) -> PathBuf {
-        config_path
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .join(&self.idl_path)
+    pub(crate) fn parse(raw: &str) -> anyhow::Result<Self> {
+        let mut config: Self = toml::from_str(raw)?;
+        match (config.program_id.take(), config.idl_path.take()) {
+            (None, None) => {}
+            (Some(program_id), Some(idl_path)) if config.programs.is_empty() => {
+                config.programs.push(ProgramConfig {
+                    program_id,
+                    idl_path,
+                });
+            }
+            (Some(_), Some(_)) => {
+                bail!("set either the top-level program_id and idl_path or [[programs]], not both")
+            }
+            _ => bail!("program_id and idl_path must be set together"),
+        }
+        Ok(config)
+    }
+
+    pub fn program_ids(&self) -> Vec<Pubkey> {
+        self.programs.iter().map(ProgramConfig::pubkey).collect()
+    }
+
+    /// The programs an event or instruction alert watches: the one it names,
+    /// or every configured program.
+    pub fn alert_program_ids<'a>(&'a self, alert: &'a AlertRule) -> Vec<&'a str> {
+        match &alert.program_id {
+            Some(program_id) => vec![program_id.as_str()],
+            None => self
+                .programs
+                .iter()
+                .map(|program| program.program_id.as_str())
+                .collect(),
+        }
     }
 
     fn validate(&self, config_path: &Path) -> anyhow::Result<()> {
-        Pubkey::from_str(&self.program_id)
-            .with_context(|| format!("invalid program_id {}", self.program_id))?;
+        if self.programs.is_empty() {
+            bail!("no program is configured: set program_id and idl_path, or add [[programs]]");
+        }
+        let mut program_ids = BTreeSet::new();
+        for program in &self.programs {
+            Pubkey::from_str(&program.program_id)
+                .with_context(|| format!("invalid program_id {}", program.program_id))?;
+            if !program_ids.insert(program.program_id.as_str()) {
+                bail!("duplicate program_id {}", program.program_id);
+            }
+            let idl_path = program.resolved_idl_path(config_path);
+            if !idl_path.is_file() {
+                bail!("IDL file {} does not exist", idl_path.display());
+            }
+        }
         let mut vault_addresses = BTreeSet::new();
         let mut state_addresses = BTreeSet::new();
         for multisig in &self.multisigs {
@@ -442,11 +509,6 @@ impl Config {
             if !state_addresses.insert(state_address) {
                 bail!("duplicate multisig.state_address {state_address}");
             }
-        }
-
-        let idl_path = self.resolved_idl_path(config_path);
-        if !idl_path.is_file() {
-            bail!("IDL file {} does not exist", idl_path.display());
         }
 
         if !(MIN_RPC_POLL_INTERVAL_SECONDS..=MAX_RPC_POLL_INTERVAL_SECONDS)
@@ -499,17 +561,49 @@ impl Config {
                 .validate(&self.alerting)
                 .with_context(|| format!("invalid alerts entry at index {index}"))?;
 
+            if let Some(program_id) = &alert.program_id {
+                if alert.kind == AlertKind::Multisig {
+                    bail!(
+                        "alerts entry at index {index} sets program_id,                          which applies to event and instruction alerts only"
+                    );
+                }
+                if !program_ids.contains(program_id.as_str()) {
+                    bail!(
+                        "alerts entry at index {index} names program_id {program_id},                          which is not a configured program"
+                    );
+                }
+            }
+
             let known_names: Vec<&str> = match alert.kind {
                 AlertKind::Event | AlertKind::Instruction => {
                     let signals = match idl_signals.as_ref() {
                         Some(signals) => signals,
-                        None => idl_signals.insert(IdlSignalNames::read(&idl_path)?),
+                        None => idl_signals.insert(
+                            self.programs
+                                .iter()
+                                .map(|program| {
+                                    IdlSignalNames::read(&program.resolved_idl_path(config_path))
+                                })
+                                .collect::<anyhow::Result<Vec<_>>>()?,
+                        ),
                     };
-                    let names = match alert.kind {
-                        AlertKind::Event => &signals.events,
-                        _ => &signals.instructions,
-                    };
-                    names.iter().map(String::as_str).collect()
+                    self.programs
+                        .iter()
+                        .zip(signals)
+                        .filter(|(program, _)| {
+                            alert
+                                .program_id
+                                .as_ref()
+                                .is_none_or(|program_id| *program_id == program.program_id)
+                        })
+                        .flat_map(|(_, signals)| match alert.kind {
+                            AlertKind::Event => &signals.events,
+                            _ => &signals.instructions,
+                        })
+                        .map(String::as_str)
+                        .collect::<BTreeSet<_>>()
+                        .into_iter()
+                        .collect()
                 }
                 AlertKind::Multisig => self
                     .multisigs
@@ -718,15 +812,17 @@ mod tests {
     use super::{
         AlertChannel, AlertCondition, AlertConditionOperator, AlertConditionValue, AlertKind,
         AlertMatch, AlertRule, AlertSeverity, AlertingConfig, Config, DatasourceConfig,
-        DatasourceMode, MultisigConfig, MultisigVersion,
+        DatasourceMode, MultisigConfig, MultisigVersion, ProgramConfig,
     };
 
     const IDL: &str = "tests/fixtures/idl.json";
 
     fn config(program_id: &str, vault_address: &str, idl_path: &str) -> Config {
         Config {
-            program_id: program_id.to_string(),
-            idl_path: idl_path.to_string(),
+            programs: vec![ProgramConfig {
+                program_id: program_id.to_string(),
+                idl_path: idl_path.to_string(),
+            }],
             multisigs: vec![MultisigConfig {
                 vault_address: vault_address.to_string(),
                 state_address: vault_address.to_string(),
@@ -963,6 +1059,7 @@ multisig_address = "11111111111111111111111111111111""#
             channels: vec![],
             lookback_window_seconds: None,
             evaluation_interval_seconds: None,
+            program_id: None,
         }
     }
 
@@ -979,6 +1076,101 @@ multisig_address = "11111111111111111111111111111111""#
         config
             .validate(Path::new("microscope.toml"))
             .expect("names declared by the IDL and the multisig version are alertable");
+    }
+
+    #[test]
+    fn programs_list_and_top_level_keys_configure_the_same_program() {
+        let top_level = Config::parse(
+            r#"program_id = "11111111111111111111111111111111"
+idl_path = "Cargo.toml"
+"#,
+        )
+        .expect("top-level keys parse");
+        let listed = Config::parse(
+            r#"[[programs]]
+program_id = "11111111111111111111111111111111"
+idl_path = "Cargo.toml"
+
+[[programs]]
+program_id = "SysvarC1ock11111111111111111111111111111111"
+idl_path = "Cargo.toml"
+"#,
+        )
+        .expect("a programs list parses");
+
+        assert_eq!(top_level.programs.len(), 1);
+        assert_eq!(
+            listed.programs[0].program_id,
+            top_level.programs[0].program_id
+        );
+        assert_eq!(listed.programs[0].idl_path, top_level.programs[0].idl_path);
+        assert_eq!(listed.programs.len(), 2);
+        listed
+            .validate(Path::new("microscope.toml"))
+            .expect("several programs are valid");
+    }
+
+    #[test]
+    fn rejects_ambiguous_incomplete_and_duplicate_programs() {
+        let program = r#"program_id = "11111111111111111111111111111111"
+idl_path = "Cargo.toml"
+"#;
+        let error = |raw: &str| {
+            let result =
+                Config::parse(raw).and_then(|config| config.validate(Path::new("microscope.toml")));
+            format!("{:#}", result.expect_err("the config must be rejected"))
+        };
+
+        assert!(error(&format!("{program}\n[[programs]]\n{program}")).contains("not both"));
+        assert!(error("program_id = \"11111111111111111111111111111111\"\n")
+            .contains("must be set together"));
+        assert!(error("").contains("no program is configured"));
+        assert!(
+            error(&format!("[[programs]]\n{program}\n[[programs]]\n{program}"))
+                .contains("duplicate program_id")
+        );
+    }
+
+    #[test]
+    fn an_alert_program_id_narrows_the_names_it_may_use() {
+        let with_events = "11111111111111111111111111111111";
+        let without_events = "SysvarC1ock11111111111111111111111111111111";
+        let config = |kind, name: &str, program_id: Option<&str>| {
+            let mut config = config(with_events, with_events, IDL);
+            config.programs.push(ProgramConfig {
+                program_id: without_events.to_string(),
+                idl_path: "tests/fixtures/idl-without-events.json".to_string(),
+            });
+            let mut rule = alert(kind, name);
+            rule.program_id = program_id.map(str::to_string);
+            config.alert_rules = vec![rule];
+            config.validate(Path::new("microscope.toml"))
+        };
+
+        config(AlertKind::Event, "record_created_event", None)
+            .expect("an alert without program_id may name any program's signal");
+        config(AlertKind::Instruction, "initialize", Some(without_events))
+            .expect("the named program declares the instruction");
+
+        let wrong_program = config(
+            AlertKind::Event,
+            "record_created_event",
+            Some(without_events),
+        )
+        .expect_err("the named program declares no such event");
+        assert!(format!("{wrong_program:#}").contains("unknown event signal"));
+
+        let unknown_program = config(
+            AlertKind::Instruction,
+            "initialize",
+            Some("Vote111111111111111111111111111111111111111"),
+        )
+        .expect_err("the alert names a program that is not configured");
+        assert!(format!("{unknown_program:#}").contains("not a configured program"));
+
+        let multisig = config(AlertKind::Multisig, "proposal_approved", Some(with_events))
+            .expect_err("multisig alerts are not scoped by program");
+        assert!(format!("{multisig:#}").contains("event and instruction alerts only"));
     }
 
     #[test]
@@ -1308,6 +1500,7 @@ evaluation_interval_seconds = 30"#,
         config.alert_rules.push(AlertRule {
             lookback_window_seconds: Some(5),
             evaluation_interval_seconds: Some(10),
+            program_id: None,
             ..alert(AlertKind::Event, "created")
         });
 
@@ -1341,6 +1534,7 @@ evaluation_interval_seconds = 30"#,
         config.alert_rules.push(AlertRule {
             lookback_window_seconds: Some(60),
             evaluation_interval_seconds: Some(15),
+            program_id: None,
             ..alert(AlertKind::Event, "created")
         });
 

@@ -2489,7 +2489,6 @@ dependencies = [
  "borsh",
  "carbon-core",
  "carbon-log-metrics",
- "carbon-program-decoder",
  "carbon-squads-mpl-decoder",
  "carbon-squads-multisig-program-decoder",
  "carbon-squads-smart-account-program-decoder",
@@ -2503,6 +2502,7 @@ dependencies = [
  "metrics",
  "metrics-exporter-prometheus",
  "metrics-util",
+ "microscope-programs",
  "regex",
  "reqwest 0.13.5",
  "rustls",
@@ -2524,6 +2524,13 @@ dependencies = [
  "wincode",
  "yellowstone-grpc-client",
  "yellowstone-grpc-proto",
+]
+
+[[package]]
+name = "microscope-programs"
+version = "0.1.0"
+dependencies = [
+ "carbon-program-decoder",
 ]
 
 [[package]]

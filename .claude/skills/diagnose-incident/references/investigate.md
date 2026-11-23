@@ -56,7 +56,7 @@ Read `crates/microscope-indexer/src/telemetry.rs` for the authoritative list. Th
 | Is the checkpoint advancing | `microscope_rpc_checkpoint_last_success_unixtime`, `microscope_rpc_checkpoint_slot`, `microscope_rpc_checkpoint_quarantined_files` |
 | What was skipped | `microscope_rpc_poll_quarantined_transactions`, `microscope_rpc_history_unavailable_total` |
 | Is anything being decoded | `microscope_transactions_total`, `microscope_errors_total`, `microscope_last_event_unixtime` |
-| Which signals, at what rate | `microscope_instructions_total{instruction}`, `microscope_program_events_total{event,source,failed}`, `microscope_multisig_activity_total{provider,version,action,failed}` |
+| Which signals, at what rate | `microscope_instructions_total{program_id,instruction}`, `microscope_program_events_total{program_id,event,source,failed}`, `microscope_multisig_activity_total{provider,version,action,failed}` |
 | Are records reaching Loki | `loki_write_sent_entries_total` (from Alloy, not the indexer) |
 
 Counters are seeded at zero on startup, so a series present at zero means running and idle, while an absent series means the indexer is gone. That distinction is the point of the seeding; do not read them as equivalent.

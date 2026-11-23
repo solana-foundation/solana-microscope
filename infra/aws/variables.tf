@@ -16,12 +16,35 @@ variable "name" {
 }
 
 variable "program_id" {
-  description = "Solana program monitored by this deployment."
+  description = "Solana program monitored by this deployment, with its IDL at idl_path. Set programs instead to monitor several."
   type        = string
+  default     = null
 
   validation {
-    condition     = can(regex("^[1-9A-HJ-NP-Za-km-z]{32,44}$", var.program_id))
+    condition     = var.program_id == null || can(regex("^[1-9A-HJ-NP-Za-km-z]{32,44}$", var.program_id))
     error_message = "program_id must be a base58 Solana public key."
+  }
+}
+
+variable "programs" {
+  description = "Optional list of programs, each with its program_id and an idl_path relative to this Terraform directory, for monitoring several in one deployment. Mutually exclusive with program_id; idl_path is then unused."
+  type = list(object({
+    program_id = string
+    idl_path   = string
+  }))
+  default = []
+
+  validation {
+    condition = alltrue([
+      for program in var.programs :
+      can(regex("^[1-9A-HJ-NP-Za-km-z]{32,44}$", program.program_id))
+    ])
+    error_message = "Each programs entry needs a base58 Solana public key for program_id."
+  }
+
+  validation {
+    condition     = length(distinct([for program in var.programs : program.program_id])) == length(var.programs)
+    error_message = "programs must not repeat a program_id."
   }
 }
 
@@ -73,7 +96,7 @@ variable "multisigs" {
 }
 
 variable "idl_path" {
-  description = "IDL path relative to this Terraform directory."
+  description = "IDL path of program_id, relative to this Terraform directory."
   type        = string
   default     = "../../idl/idl1.json"
 }
@@ -289,6 +312,7 @@ variable "alerts" {
     channels                    = optional(set(string), [])
     lookback_window_seconds     = optional(number)
     evaluation_interval_seconds = optional(number)
+    program_id                  = optional(string)
   }))
   default = []
 

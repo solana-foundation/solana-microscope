@@ -43,7 +43,11 @@ fn overview_document(config: &Config, rpc_polling: bool) -> anyhow::Result<Value
     let panels = dashboard["panels"]
         .as_array_mut()
         .ok_or_else(|| anyhow!("overview dashboard template is missing panels"))?;
-    #[cfg(program_events)]
+    // A program whose IDL declares no events emits none, so the panel would sit
+    // permanently empty, which reads the same as broken decoding.
+    if crate::programs::compiled()
+        .iter()
+        .any(|program| program.declares_events)
     {
         let event_panel = panels
             .iter_mut()
@@ -54,9 +58,18 @@ fn overview_document(config: &Config, rpc_polling: bool) -> anyhow::Result<Value
             &config.dashboard.event_fields,
             "event_field",
             "program_event",
-            ("program_id", &[config.program_id.as_str()]),
-            "Decoded program events for the configured program. Missing configured fields display as a placeholder.",
+            (
+                "program_id",
+                &config
+                    .programs
+                    .iter()
+                    .map(|program| program.program_id.as_str())
+                    .collect::<Vec<_>>(),
+            ),
+            "Decoded program events for every configured program. Missing configured fields display as a placeholder.",
         );
+    } else {
+        remove_panels(panels, &[EVENT_PANEL_ID]);
     }
 
     if !config.multisigs.is_empty() {
@@ -90,11 +103,6 @@ fn overview_document(config: &Config, rpc_polling: bool) -> anyhow::Result<Value
     if config.multisigs.is_empty() {
         remove_panels(panels, &[MULTISIG_ACTIVITY_PANEL_ID, MULTISIG_PANEL_ID]);
     }
-
-    // A program whose IDL declares no events emits none, so the panel would sit
-    // permanently empty, which reads the same as broken decoding.
-    #[cfg(not(program_events))]
-    remove_panels(panels, &[EVENT_PANEL_ID]);
 
     Ok(dashboard)
 }
@@ -371,7 +379,7 @@ fn collision_safe_display_names(paths: &[String]) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use crate::config::{Config, DashboardConfig, DatasourceMode};
+    use crate::config::{Config, DatasourceMode};
     use serde_json::json;
 
     use super::{
@@ -380,13 +388,10 @@ mod tests {
     };
 
     fn config(event_fields: &[&str]) -> Config {
-        Config {
-            dashboard: DashboardConfig {
-                event_fields: event_fields.iter().map(|field| field.to_string()).collect(),
-                ..DashboardConfig::default()
-            },
-            ..crate::test_support::config()
-        }
+        let mut config = crate::test_support::config();
+        config.dashboard.event_fields =
+            event_fields.iter().map(|field| field.to_string()).collect();
+        config
     }
 
     #[test]
@@ -431,7 +436,7 @@ mod tests {
     #[test]
     fn table_panels_hide_records_from_a_previously_monitored_target() {
         let mut config = config(&["name"]);
-        config.program_id = "So11111111111111111111111111111111111111112".to_string();
+        config.programs[0].program_id = "So11111111111111111111111111111111111111112".to_string();
         config.multisigs[0].vault_address =
             "SysvarC1ock11111111111111111111111111111111".to_string();
 

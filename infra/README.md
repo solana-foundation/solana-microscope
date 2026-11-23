@@ -19,7 +19,8 @@ tunnel to reach Grafana.
 
 Both deployments require:
 
-- a program ID and local IDL file;
+- a program ID and local IDL file (`program_id`, `idl_path`), or a list of
+  them (`programs`) to monitor several programs, not both;
 - optionally, a Squads default vault, internal state account, and explicit v3/v4/v5 version
   (`multisig`), or a list of them (`multisigs`) to monitor several, not both;
 - decoded-event table fields;
@@ -213,9 +214,9 @@ Cloud-init installs Docker and a `microscope-deploy` systemd service and timer.
 On GCP it also installs `microscope-metadata-guard.service`, which inserts a
 `DOCKER-USER` rule rejecting container traffic to the instance metadata server
 (`169.254.169.254:80`); AWS relies on IMDSv2 with a hop limit of 1 instead.
-The reconciler downloads the desired manifest, credentials, IDL, and
-`microscope.toml`; verifies the config and IDL against the manifest's SHA-256
-digests and aborts on a mismatch; clones and checks out `repository_ref`;
+The reconciler downloads the desired manifest, credentials, every program's
+IDL, and `microscope.toml`; verifies the config and IDLs against the manifest's
+SHA-256 digests and aborts on a mismatch; clones and checks out `repository_ref`;
 builds the indexer; generates the Grafana dashboard and alerting resources
 (local-stack mode only; in `grafana_cloud` mode no provisioning is generated
 on the VM); starts the stack; and records the applied deployment revision. The
@@ -292,8 +293,11 @@ Within one minute, the existing VM applies the revision:
 - dashboard, alert, and secret changes recreate the indexer and regenerate
   local provisioning without rebuilding the Rust image; in `grafana_cloud`
   mode re-export and push the hosted resources yourself;
-- IDL and `program_id` changes rebuild the indexer image so its generated
-  decoder matches the uploaded inputs;
+- IDL and `program_id` changes, including adding or removing a `programs`
+  entry, rebuild the indexer image so its generated decoders match the
+  uploaded inputs. A changed program list also changes the monitored
+  addresses, which disables RPC recovery until the RPC checkpoint is removed
+  (see "RPC recovery disabled itself" in `docs/operations.md`);
 - a `repository_ref` change fetches and checks out the selected commit,
   rebuilding only when the resolved commit differs; a `repository_url` change
   discards the old checkout and re-clones;
@@ -338,3 +342,26 @@ terraform apply -replace=google_compute_instance.this
 
 Do not force replacement for later config, IDL, secret, alert, dashboard, or
 repository-ref changes.
+
+### Monitoring several programs
+
+Set `programs` instead of `program_id` and `idl_path`:
+
+```hcl
+programs = [
+  { program_id = "<FIRST_PROGRAM_ID>", idl_path = "idl/first.json" },
+  { program_id = "<SECOND_PROGRAM_ID>", idl_path = "idl/second.json" },
+]
+```
+
+Each `idl_path` is relative to the Terraform directory. Terraform uploads one
+IDL object per program and renders one `[[programs]]` table per entry, in this
+order. An `event` or `instruction` alert covers every program unless it sets
+`program_id` to one of them.
+
+The first program keeps the `program.json` object and the manifest fields a
+single-program deployment uses, so moving a deployment from `program_id` to a
+one-entry `programs` list only rewrites `microscope.toml`. Further programs
+need the reconciler from this version on the VM. A VM created by an earlier
+version ignores them and its image build fails on the missing IDL, so replace
+it first (automatic on AWS, explicit on GCP, as described above).

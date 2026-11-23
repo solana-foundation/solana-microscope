@@ -1,0 +1,11 @@
+[package]
+name = "microscope-programs"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+carbon-program-decoder = { path = "0", features = ["base58"] }

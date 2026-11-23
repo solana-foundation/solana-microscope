@@ -22,15 +22,16 @@ RUN ./scripts/ensure-decoder-tool.sh
 # deterministic, so the copies of them below stay cache hits.
 COPY . .
 RUN ./scripts/generate-decoder.sh
-# The runtime resolves idl_path against the config's directory, so the IDL has
-# to keep its relative path into the image. Only the configured one is needed:
-# the decoder is built for a single program and main.rs rejects any other IDL.
+# The runtime resolves idl_path against the config's directory, so each IDL has
+# to keep its relative path into the image. Only the configured ones are needed:
+# the decoders are built for those programs and main.rs rejects any other IDL.
 RUN mkdir -p /staged \
-    && cp --parents "$(python3 -c "import tomllib; print(tomllib.load(open('microscope.toml','rb'))['idl_path'])")" /staged/
+    && python3 -c "import tomllib; c = tomllib.load(open('microscope.toml','rb')); print('\n'.join(p['idl_path'] for p in c.get('programs') or [c]))" \
+    | xargs -d '\n' cp --parents -t /staged/
 
 FROM chef AS planner
 COPY . .
-COPY --from=decoders /app/crates/program-decoder crates/program-decoder
+COPY --from=decoders /app/crates/programs crates/programs
 COPY --from=decoders /app/crates/squads-v3-decoder crates/squads-v3-decoder
 COPY --from=decoders /app/crates/squads-v4-decoder crates/squads-v4-decoder
 COPY --from=decoders /app/crates/squads-smart-account-decoder crates/squads-smart-account-decoder
@@ -40,7 +41,7 @@ FROM chef AS builder
 # The decoder crates are path dependencies outside the workspace, and cargo-chef
 # reads their manifests rather than reconstructing skeletons for them, so they
 # have to exist before cook runs.
-COPY --from=decoders /app/crates/program-decoder crates/program-decoder
+COPY --from=decoders /app/crates/programs crates/programs
 COPY --from=decoders /app/crates/squads-v3-decoder crates/squads-v3-decoder
 COPY --from=decoders /app/crates/squads-v4-decoder crates/squads-v4-decoder
 COPY --from=decoders /app/crates/squads-smart-account-decoder crates/squads-smart-account-decoder

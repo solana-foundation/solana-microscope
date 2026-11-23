@@ -73,9 +73,12 @@ write_config() {
 write_config program-one first-config
 printf '{}\n' >"$BUCKET_DIR/idl/program.json"
 
+EXTRA_IDLS='[]'
+
 write_manifest() {
   local revision="$1"
   jq --null-input \
+    --argjson extra_idls "$EXTRA_IDLS" \
     --arg revision "$revision" \
     --arg repository_url "${2:-$SOURCE_REPOSITORY}" \
     --arg repository_ref "${3:-main}" \
@@ -91,7 +94,7 @@ write_manifest() {
       idl_object: "idl/program.json",
       idl_sha256: $idl_sha256,
       secret_version: "test-version"
-    }' >"$BUCKET_DIR/deployment.json"
+    } + (if $extra_idls == [] then {} else {extra_idls: $extra_idls} end)' >"$BUCKET_DIR/deployment.json"
 }
 
 write_manifest revision-one
@@ -238,6 +241,56 @@ reconcile
 [[ "$(<"$STATE_DIR/applied-revision")" == revision-five ]]
 [[ "$(grep --count '^compose build indexer$' "$DOCKER_LOG")" == 5 ]]
 
+extra_idl() {
+  jq --null-input --arg object "$1" \
+    --arg sha256 "$(sha256sum "$BUCKET_DIR/$1" | cut -d' ' -f1)" \
+    '[{object: $object, sha256: $sha256}]'
+}
+
+printf 'program_id = "program-two"\n[[programs]]\nprogram_id = "program-three"\n' \
+  >"$BUCKET_DIR/config/microscope.toml"
+printf '{"program":"three"}\n' >"$BUCKET_DIR/idl/program-1.json"
+EXTRA_IDLS="$(extra_idl idl/program-1.json)"
+write_manifest revision-second-program
+reconcile
+
+[[ "$(<"$STATE_DIR/applied-revision")" == revision-second-program ]]
+[[ "$(<"$INSTALL_ROOT/repository/idl/program-1.json")" == '{"program":"three"}' ]]
+[[ "$(<"$INSTALL_ROOT/repository/idl/program.json")" == '{"version":3}' ]]
+[[ "$(grep --count '^compose build indexer$' "$DOCKER_LOG")" == 6 ]]
+
+printf '{"program":"three","version":2}\n' >"$BUCKET_DIR/idl/program-1.json"
+EXTRA_IDLS="$(extra_idl idl/program-1.json)"
+write_manifest revision-second-program-idl
+reconcile
+
+[[ "$(<"$STATE_DIR/applied-revision")" == revision-second-program-idl ]]
+[[ "$(grep --count '^compose build indexer$' "$DOCKER_LOG")" == 7 ]]
+
+printf '[[alerts]]\nprogram_id = "program-three"\n' >>"$BUCKET_DIR/config/microscope.toml"
+write_manifest revision-alert-program
+reconcile
+
+[[ "$(<"$STATE_DIR/applied-revision")" == revision-alert-program ]]
+[[ "$(grep --count '^compose build indexer$' "$DOCKER_LOG")" == 7 ]]
+
+EXTRA_IDLS="$(extra_idl idl/program-1.json | jq '.[0].sha256 = "stale"')"
+write_manifest revision-second-program-raced
+if reconcile; then
+  printf 'an extra IDL that does not match its manifest digest must abort the reconcile\n' >&2
+  exit 1
+fi
+
+[[ ! -e "$STATE_DIR/applied-revision" ]]
+
+EXTRA_IDLS='[]'
+write_config program-two second-config
+write_manifest revision-five
+reconcile
+
+[[ "$(<"$STATE_DIR/applied-revision")" == revision-five ]]
+[[ "$(grep --count '^compose build indexer$' "$DOCKER_LOG")" == 8 ]]
+
 jq '.grafana_admin_password = ""
   | .grafana_cloud_loki_url = "https://loki.example.invalid/push"
   | .grafana_cloud_loki_user = "111"
@@ -257,9 +310,9 @@ grep --quiet '^MICROSCOPE_DEPLOYMENT="test-deployment"$' "$INSTALL_ROOT/reposito
 [[ "$(grep --count '^compose --file docker-compose.yml --file docker-compose.cloud.yml up --detach --no-build --remove-orphans alloy$' "$DOCKER_LOG")" == 1 ]]
 [[ "$(grep --count -- '--profile local-stack stop alerting-config prometheus loki grafana$' "$DOCKER_LOG")" == 1 ]]
 [[ "$(grep --count -- '--profile local-stack rm --force alerting-config prometheus loki grafana$' "$DOCKER_LOG")" == 1 ]]
-[[ "$(grep --count '^compose run --rm --no-deps alerting-config$' "$DOCKER_LOG")" == 7 ]]
-[[ "$(grep --count 'force-recreate grafana$' "$DOCKER_LOG")" == 6 ]]
-[[ "$(grep --count 'force-recreate indexer$' "$DOCKER_LOG")" == 7 ]]
+[[ "$(grep --count '^compose run --rm --no-deps alerting-config$' "$DOCKER_LOG")" == 11 ]]
+[[ "$(grep --count 'force-recreate grafana$' "$DOCKER_LOG")" == 10 ]]
+[[ "$(grep --count 'force-recreate indexer$' "$DOCKER_LOG")" == 11 ]]
 
 write_manifest revision-seven "$OTHER_REPOSITORY"
 reconcile

@@ -15,6 +15,12 @@ program_id = "De1egAFMkMWZSN5rYXRj9CAdheBamobVNubTsi9avR44"
 # infra/aws/idl/, which is gitignored, so upgrading the template never renames
 # or removes the file a live stack indexes.
 idl_path = "../../idl/idl1.json"
+# Or, to monitor several programs, set programs instead of program_id and
+# idl_path (not both). An alert may then set program_id to watch one of them.
+# programs = [
+#   { program_id = "first-program-id", idl_path = "idl/first.json" },
+#   { program_id = "second-program-id", idl_path = "idl/second.json" },
+# ]
 
 # Yellowstone is the default. A non-empty rpc_url adds automatic gap recovery.
 # For RPC-only polling, set datasource.mode to "rpc" and leave

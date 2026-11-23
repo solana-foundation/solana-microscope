@@ -159,6 +159,10 @@ jq --exit-status '
   (.config_sha256 | type == "string" and length > 0) and
   (.idl_object | type == "string" and length > 0) and
   (.idl_sha256 | type == "string" and length > 0) and
+  ((.extra_idls // []) | all(
+    (.object | type == "string" and length > 0) and
+    (.sha256 | type == "string" and length > 0)
+  )) and
   (.secret_version | type == "string" and length > 0)
 ' "$manifest_file" >/dev/null
 
@@ -173,6 +177,7 @@ config_object="$(jq --raw-output .config_object "$manifest_file")"
 config_sha256="$(jq --raw-output .config_sha256 "$manifest_file")"
 idl_object="$(jq --raw-output .idl_object "$manifest_file")"
 idl_sha256="$(jq --raw-output .idl_sha256 "$manifest_file")"
+extra_idl_count="$(jq '(.extra_idls // []) | length' "$manifest_file")"
 secret_version="$(jq --raw-output .secret_version "$manifest_file")"
 
 log "reconciling deployment revision $desired_revision"
@@ -182,6 +187,13 @@ fetch_object "$config_object" "$config_file"
 fetch_object "$idl_object" "$idl_file"
 verify_digest "$config_file" "$config_sha256"
 verify_digest "$idl_file" "$idl_sha256"
+# The n-th extra program's IDL is program-<n>.json here and under idl/ in the
+# checkout, which is the idl_path Terraform renders for it.
+for ((index = 0; index < extra_idl_count; index++)); do
+  extra_idl_file="$work_dir/program-$((index + 1)).json"
+  fetch_object "$(jq --raw-output ".extra_idls[$index].object" "$manifest_file")" "$extra_idl_file"
+  verify_digest "$extra_idl_file" "$(jq --raw-output ".extra_idls[$index].sha256" "$manifest_file")"
+done
 
 repository_deploy_key="$(jq --raw-output '.repository_deploy_key // empty' "$secret_file")"
 if [[ -n "$repository_deploy_key" ]]; then
@@ -235,15 +247,24 @@ if [[ -n "$deploy_key_file" ]]; then
 fi
 
 install -d -m 0755 "$REPOSITORY_DIR/idl"
-program_id="$(sed -nE 's/^[[:space:]]*"?program_id"?[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' \
-  "$config_file" | head -n 1)"
-if [[ -z "$program_id" ]]; then
+# Only the programs decoders are generated for: an alert's program_id selector
+# must not trigger a rebuild.
+program_ids="$(awk '
+  BEGIN { monitored = 1 }
+  /^[[:space:]]*\[/ { monitored = /^[[:space:]]*\[\[programs\]\][[:space:]]*$/ }
+  monitored && /^[[:space:]]*"?program_id"?[[:space:]]*=[[:space:]]*"[^"]+"/ {
+    count = split($0, parts, "\"")
+    print parts[count - 1]
+  }
+' "$config_file" | paste --serial --delimiters=, -)"
+if [[ -z "$program_ids" ]]; then
   echo "microscope.toml declares no program_id, so a decoder rebuild cannot be detected" >&2
   exit 1
 fi
-build_inputs="$resolved_commit $(sha256sum "$idl_file" | cut -d' ' -f1) $program_id"
+idl_digests="$(sha256sum "$work_dir"/program*.json | cut -d' ' -f1 | paste --serial --delimiters=, -)"
+build_inputs="$resolved_commit $idl_digests $program_ids"
 install -m 0644 "$config_file" "$REPOSITORY_DIR/microscope.toml"
-install -m 0644 "$idl_file" "$REPOSITORY_DIR/idl/program.json"
+install -m 0644 "$work_dir"/program*.json "$REPOSITORY_DIR/idl/"
 
 grafana_cloud_enabled="$(jq --raw-output '(.grafana_cloud_token // "") != ""' "$secret_file")"
 

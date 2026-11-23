@@ -5,7 +5,6 @@ mod config;
 mod dashboard;
 mod datasource;
 mod delivered;
-#[cfg(program_events)]
 mod events;
 mod files;
 mod health;
@@ -13,6 +12,7 @@ mod instructions;
 mod logging;
 mod multisig;
 mod processor;
+mod programs;
 mod rpc_polling;
 mod shipped;
 mod telemetry;
@@ -28,7 +28,6 @@ use carbon_core::{
     pipeline::{Pipeline, PipelineBuilder, ShutdownStrategy},
 };
 use carbon_log_metrics::LogMetrics;
-use carbon_program_decoder::{ProgramDecoder, PROGRAM_ID};
 use carbon_squads_smart_account_decoder::SquadsSmartAccountProgramDecoder;
 use carbon_squads_v3_decoder::SquadsMplDecoder;
 use carbon_squads_v4_decoder::SquadsMultisigProgramDecoder;
@@ -36,10 +35,7 @@ use clap::Parser;
 use cli::{Cli, Command};
 use config::{Config, DatasourceMode, MultisigVersion};
 use multisig::{SmartAccountProcessor, SquadsV3Processor, SquadsV4Processor, VerifiedMultisig};
-use processor::EventProcessor;
 use sha2::{Digest, Sha256};
-
-const BUILD_IDL_SHA256: &str = include_str!("../../program-decoder/.microscope-idl.sha256");
 
 // reqwest's `rustls-no-provider` ships none, and Err means one is already installed.
 pub(crate) fn install_crypto_provider() {
@@ -54,28 +50,41 @@ fn load_config(config_path: &Path) -> Config {
 }
 
 fn verify_decoder_target(config: &Config, config_path: &Path) {
-    if config.program_id != PROGRAM_ID.to_string() {
+    let compiled = programs::compiled();
+    let compiled_ids = compiled
+        .iter()
+        .map(|program| program.id)
+        .collect::<Vec<_>>();
+    if config.program_ids() != compiled_ids {
         panic!(
-            "config program_id {} does not match the generated decoder's program id {} \
-             (run `just generate` after changing microscope.toml or the IDL)",
-            config.program_id, PROGRAM_ID
+            "config programs {} do not match the generated decoders' programs {} \
+             (run `just generate` after changing microscope.toml or an IDL)",
+            joined_or_none(
+                config
+                    .programs
+                    .iter()
+                    .map(|program| program.program_id.clone())
+            ),
+            joined_or_none(compiled_ids.iter().map(ToString::to_string)),
         );
     }
-    let idl_path = config.resolved_idl_path(config_path);
-    let idl = std::fs::read(&idl_path)
-        .unwrap_or_else(|err| panic!("failed to read IDL {}: {err:?}", idl_path.display()));
-    if !idl_matches_decoder(&idl) {
-        panic!(
-            "IDL {} does not match the IDL the decoder was generated from \
-             (run `just generate` after changing microscope.toml or the IDL, or run an image \
-             built from this IDL)",
-            idl_path.display()
-        );
+    for (program, compiled) in config.programs.iter().zip(&compiled) {
+        let idl_path = program.resolved_idl_path(config_path);
+        let idl = std::fs::read(&idl_path)
+            .unwrap_or_else(|err| panic!("failed to read IDL {}: {err:?}", idl_path.display()));
+        if !idl_matches_decoder(&idl, compiled.idl_sha256) {
+            panic!(
+                "IDL {} does not match the IDL the decoder was generated from \
+                 (run `just generate` after changing microscope.toml or the IDL, or run an image \
+                 built from this IDL)",
+                idl_path.display()
+            );
+        }
     }
 }
 
-fn idl_matches_decoder(idl: &[u8]) -> bool {
-    format!("{:x}", Sha256::digest(idl)) == BUILD_IDL_SHA256.trim()
+fn idl_matches_decoder(idl: &[u8], built_sha256: &str) -> bool {
+    format!("{:x}", Sha256::digest(idl)) == built_sha256
 }
 
 fn deduplication_filters() -> Vec<Box<dyn Filter>> {
@@ -90,11 +99,7 @@ fn with_instruction_pipes(
     builder: PipelineBuilder,
     multisigs: &[VerifiedMultisig],
 ) -> PipelineBuilder {
-    let builder = builder.instruction_with_filters(
-        ProgramDecoder,
-        EventProcessor::default(),
-        deduplication_filters(),
-    );
+    let builder = programs::with_pipes(builder, deduplication_filters);
     let mut builder = builder.transaction::<shipped::NoInstructions, _>(shipped::ShippedProcessor);
     let configures = |version| multisigs.iter().any(|multisig| multisig.version == version);
     if configures(MultisigVersion::V3) {
@@ -165,7 +170,7 @@ fn with_rpc_recovery(
 ) -> (PipelineBuilder, ShutdownStrategy) {
     let delivered = delivered::DeliveredSignatures::new();
     match rpc_polling::RpcPollingDatasource::from_env(
-        PROGRAM_ID,
+        &config.program_ids(),
         multisig_state_addresses,
         Duration::from_secs(config.datasource.poll_interval_seconds),
         config.datasource.replay_window_slots,
@@ -232,8 +237,8 @@ async fn main() -> CarbonResult<()> {
 
     log::info!(
         "microscope-indexer starting: program_id={} idl_path={} multisig_vault={} multisig_version={} datasource={} alert_rules={}",
-        config.program_id,
-        config.idl_path,
+        joined_or_none(config.programs.iter().map(|program| program.program_id.clone())),
+        joined_or_none(config.programs.iter().map(|program| program.idl_path.clone())),
         joined_or_none(
             config
                 .multisigs
@@ -262,7 +267,10 @@ async fn main() -> CarbonResult<()> {
     let (builder, shutdown_strategy) = match config.datasource.mode {
         DatasourceMode::Yellowstone => with_rpc_recovery(
             builder,
-            datasource::yellowstone(&config.program_id, &multisig_state_addresses),
+            datasource::yellowstone(&rpc_polling::monitored_addresses(
+                &config.program_ids(),
+                &multisig_state_addresses,
+            )),
             &config,
             &multisig_state_addresses,
             "Yellowstone",
@@ -272,7 +280,7 @@ async fn main() -> CarbonResult<()> {
             health::expect_poll_heartbeat(config.datasource.rpc_poll_stale_after_seconds());
             (
                 builder.datasource(rpc_polling::RpcPollingDatasource::require_from_env(
-                    PROGRAM_ID,
+                    &config.program_ids(),
                     &multisig_state_addresses,
                     Duration::from_secs(config.datasource.poll_interval_seconds),
                     config.datasource.replay_window_slots,
@@ -334,7 +342,12 @@ async fn run_backfill(
     let multisigs = verify_configured_multisigs(&config);
     log::info!(
         "backfilling {} and {} since unix time {cutoff_unix} into {loki_url}",
-        config.program_id,
+        joined_or_none(
+            config
+                .programs
+                .iter()
+                .map(|program| program.program_id.clone())
+        ),
         joined_or_none(
             multisigs
                 .iter()
@@ -351,7 +364,7 @@ async fn run_backfill(
     let crawl_failures = Arc::new(std::sync::atomic::AtomicU32::new(0));
     let mut builder = Pipeline::builder();
     for address in rpc_polling::monitored_addresses(
-        PROGRAM_ID,
+        &config.program_ids(),
         &multisigs
             .iter()
             .map(|verified| verified.state_address)
@@ -469,11 +482,21 @@ mod tests {
     fn rejects_an_idl_the_decoder_was_not_generated_from() {
         let config_path = std::path::Path::new("../../microscope.toml");
         let config = super::Config::load(config_path).expect("the repository is configured");
-        let built_idl = std::fs::read(config.resolved_idl_path(config_path))
+        let built_idl = std::fs::read(config.programs[0].resolved_idl_path(config_path))
             .expect("the configured IDL is readable");
+        let built_sha256 = super::programs::compiled()[0].idl_sha256;
 
-        assert!(super::idl_matches_decoder(&built_idl));
-        assert!(!super::idl_matches_decoder(b"{}"));
+        assert!(super::idl_matches_decoder(&built_idl, built_sha256));
+        assert!(!super::idl_matches_decoder(b"{}", built_sha256));
+    }
+
+    #[test]
+    #[should_panic(expected = "do not match the generated decoders' programs")]
+    fn rejects_a_config_whose_programs_are_not_the_compiled_ones() {
+        super::verify_decoder_target(
+            &crate::test_support::config(),
+            std::path::Path::new("microscope.toml"),
+        );
     }
 
     #[test]
