@@ -249,6 +249,30 @@ fn log_stream_selector_for(deployment: Option<&str>) -> String {
     }
 }
 
+/// The same holds for metrics: on a shared stack every deployment's series
+/// share a name, and Alloy adds the deployment as an external label.
+fn scope_metrics(query: &str) -> String {
+    scope_metrics_for(query, env::var("MICROSCOPE_DEPLOYMENT").ok().as_deref())
+}
+
+fn scope_metrics_for(query: &str, deployment: Option<&str>) -> String {
+    let Some(deployment) = deployment.map(str::trim).filter(|d| !d.is_empty()) else {
+        return query.to_string();
+    };
+    let series = regex::Regex::new(r"\b((?:microscope|loki_write)_[a-z_]+)(?:\{([^}]*)\})?")
+        .expect("the series pattern is valid");
+    series
+        .replace_all(query, |captures: &regex::Captures| match captures.get(2) {
+            Some(matchers) => format!(
+                "{}{{deployment=\"{deployment}\", {}}}",
+                &captures[1],
+                matchers.as_str()
+            ),
+            None => format!("{}{{deployment=\"{deployment}\"}}", &captures[1]),
+        })
+        .into_owned()
+}
+
 fn health_channel_names(channels: &BTreeSet<AlertChannel>) -> Vec<&str> {
     if channels.is_empty() {
         vec!["none"]
@@ -604,7 +628,7 @@ fn prometheus_health_rule(
             "model": {
                 "datasource": { "type": "prometheus", "uid": "prometheus" },
                 "editorMode": "code",
-                "expr": query,
+                "expr": scope_metrics(query),
                 "instant": true,
                 "intervalMs": 15000,
                 "legendFormat": "__auto",
@@ -915,7 +939,8 @@ fn logql_query(config: &Config, alert: &AlertRule) -> anyhow::Result<String> {
         }
 
         Ok(format!(
-            "sum by ({grouping}) (count_over_time({{service_name=\"microscope-indexer\"}} {parser} {filters} | __error__ = \"\" [{lookback_window_seconds}s]))"
+            "sum by ({grouping}) (count_over_time({} {parser} {filters} | __error__ = \"\" [{lookback_window_seconds}s]))",
+            log_stream_selector()
         ))
     };
 
@@ -1061,7 +1086,7 @@ mod tests {
 
     use super::{
         add_resource_deletions, deletion_uids, grafana_rule, log_stream_selector_for, logql_query,
-        provisioning_document, rule_uids,
+        provisioning_document, rule_uids, scope_metrics_for,
     };
 
     fn alert(kind: AlertKind, name: &str) -> AlertRule {
@@ -1354,6 +1379,27 @@ mod tests {
             log_stream_selector_for(None),
             "{service_name=\"microscope-indexer\"}"
         );
+    }
+
+    #[test]
+    fn scopes_metric_queries_to_the_deployment_sharing_the_stack() {
+        assert_eq!(
+            scope_metrics_for(
+                "sum(increase(microscope_transactions_total[10m])) > 0 unless sum(increase(loki_write_sent_entries_total[10m])) > 0",
+                Some("mainnet")
+            ),
+            "sum(increase(microscope_transactions_total{deployment=\"mainnet\"}[10m])) > 0 unless sum(increase(loki_write_sent_entries_total{deployment=\"mainnet\"}[10m])) > 0"
+        );
+        assert_eq!(
+            scope_metrics_for(
+                "max(microscope_rpc_active_endpoint{role=\"fallback\"}) or on() vector(0)",
+                Some("mainnet")
+            ),
+            "max(microscope_rpc_active_endpoint{deployment=\"mainnet\", role=\"fallback\"}) or on() vector(0)"
+        );
+        let query = "max(microscope_rpc_recovery_degraded)";
+        assert_eq!(scope_metrics_for(query, Some("  ")), query);
+        assert_eq!(scope_metrics_for(query, None), query);
     }
 
     #[test]
