@@ -47,7 +47,7 @@ jobs:
           cargo audit --json \
             | jq -r '.vulnerabilities.list[].package | "--package=\(.name)@\(.version)"' \
             | sort -u \
-            | xargs -r cargo update
+            | xargs -r cargo update --recursive
 
       - name: Verify audits pass
         run: |
@@ -62,6 +62,6 @@ jobs:
           commit-message: 'fix(deps): resolve npm and cargo audit advisories'
           title: 'fix(deps): resolve npm and cargo audit advisories'
           body: |
-            Automated by the `Audit Fix` workflow: `npm audit fix` for npm advisories and `cargo update -p` for vulnerable crates, then the audits re-run clean.
+            Automated by the `Audit Fix` workflow: `npm audit fix` for npm advisories and `cargo update -p --recursive` for vulnerable crates, then the audits re-run clean.
 
             Approve the pending workflow runs to start CI, and review forced overrides for major-version jumps before merging.
