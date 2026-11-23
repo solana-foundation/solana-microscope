@@ -1,10 +1,15 @@
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::{
+    env,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+};
 
 use axum::{extract::Request, http::StatusCode, routing::get, Router};
 
-use crate::telemetry::unix_now;
+use crate::telemetry::{bind_addr, unix_now};
 
-const PROBE_PORT: u16 = 9091;
+const PROBE_ADDR_VAR: &str = "MICROSCOPE_PROBE_ADDR";
+const DEFAULT_PROBE_ADDR: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 9091);
 
 static STARTED: AtomicBool = AtomicBool::new(false);
 static POLL_STALE_AFTER_SECONDS: AtomicU64 = AtomicU64::new(0);
@@ -52,9 +57,16 @@ pub async fn serve() {
             )
         });
 
-    let listener = tokio::net::TcpListener::bind(("0.0.0.0", PROBE_PORT))
+    let addr = bind_addr(
+        PROBE_ADDR_VAR,
+        env::var(PROBE_ADDR_VAR).ok().as_deref(),
+        DEFAULT_PROBE_ADDR,
+    )
+    .unwrap_or_else(|message| panic!("{message}"));
+
+    let listener = tokio::net::TcpListener::bind(addr)
         .await
-        .unwrap_or_else(|err| panic!("failed to bind the probe port {PROBE_PORT}: {err}"));
+        .unwrap_or_else(|err| panic!("failed to bind the probe address {addr}: {err}"));
 
     tokio::spawn(async move {
         axum::serve(listener, router)

@@ -6,6 +6,7 @@ mod dashboard;
 mod datasource;
 mod delivered;
 mod events;
+mod failover;
 mod files;
 mod health;
 mod instructions;

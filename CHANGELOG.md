@@ -31,6 +31,10 @@ version and the section heading below.
   Adding a multisig to a running deployment changes the monitored addresses,
   so RPC recovery stays disabled until the RPC checkpoint is removed (see
   "RPC recovery disabled itself" in `docs/operations.md`).
+- `MICROSCOPE_METRICS_ADDR` and `MICROSCOPE_PROBE_ADDR` set the addresses the
+  metrics exporter and the health probes listen on, for example
+  `127.0.0.1:9090` on a host without Docker. Unset, they stay `0.0.0.0:9090`
+  and `0.0.0.0:9091`; a value that does not parse stops startup.
 
 ### Changed
 

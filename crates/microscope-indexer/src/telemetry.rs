@@ -1,14 +1,27 @@
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    env,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use metrics_exporter_prometheus::PrometheusBuilder;
 
-const METRICS_PORT: u16 = 9090;
+const METRICS_ADDR_VAR: &str = "MICROSCOPE_METRICS_ADDR";
+const DEFAULT_METRICS_ADDR: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 9090);
 
 pub fn install() {
+    let addr = bind_addr(
+        METRICS_ADDR_VAR,
+        env::var(METRICS_ADDR_VAR).ok().as_deref(),
+        DEFAULT_METRICS_ADDR,
+    )
+    .unwrap_or_else(|message| panic!("{message}"));
+
     // carbon-prometheus-metrics binds 127.0.0.1 only, which isn't reachable from other
-    // docker-compose containers, so the exporter is installed directly here on 0.0.0.0.
+    // docker-compose containers, so the exporter is installed directly here, on 0.0.0.0
+    // by default.
     PrometheusBuilder::new()
-        .with_http_listener(([0, 0, 0, 0], METRICS_PORT))
+        .with_http_listener(addr)
         .install()
         .expect("failed to install Prometheus exporter");
 
@@ -16,6 +29,20 @@ pub fn install() {
     // (and alertable) even before the first decoded event arrives.
     record_event();
     initialize_transactions();
+}
+
+/// Resolves a listener address from an env var value, or the default when unset or empty.
+pub fn bind_addr(
+    variable: &str,
+    configured: Option<&str>,
+    default: SocketAddr,
+) -> Result<SocketAddr, String> {
+    let Some(value) = configured.filter(|value| !value.is_empty()) else {
+        return Ok(default);
+    };
+    value
+        .parse()
+        .map_err(|_| format!("invalid {variable} value: {value:?}"))
 }
 
 /// Seeds the counters the transaction panels chart, so a deployment that has
@@ -88,40 +115,86 @@ pub fn record_event() {
 
 /// Seeds the counters at zero so the first disconnect registers as an increase
 /// rather than as a series appearing, which `increase()` cannot see.
-pub fn initialize_yellowstone() {
-    record_yellowstone_disconnects(0, 0);
+pub fn initialize_yellowstone(endpoint: &str) {
+    record_yellowstone_disconnects(endpoint, 0, 0);
 }
 
 /// Counts an established stream going silent, which is narrower than the stream
 /// being unusable: a subscribe that never succeeds notifies nothing, so a flat
 /// counter is not evidence the datasource was connected.
 /// `microscope_yellowstone_probe_healthy` covers that case.
-pub fn record_yellowstone_disconnect(missed_slots: u64) {
-    record_yellowstone_disconnects(1, missed_slots);
+pub fn record_yellowstone_disconnect(endpoint: &str, missed_slots: u64) {
+    record_yellowstone_disconnects(endpoint, 1, missed_slots);
 }
 
-fn record_yellowstone_disconnects(disconnects: u64, missed_slots: u64) {
-    metrics::counter!("microscope_yellowstone_disconnects_total").increment(disconnects);
-    metrics::counter!("microscope_yellowstone_missed_slots_total").increment(missed_slots);
+fn record_yellowstone_disconnects(endpoint: &str, disconnects: u64, missed_slots: u64) {
+    metrics::counter!("microscope_yellowstone_disconnects_total", "endpoint" => endpoint.to_string())
+        .increment(disconnects);
+    metrics::counter!("microscope_yellowstone_missed_slots_total", "endpoint" => endpoint.to_string())
+        .increment(missed_slots);
 }
 
 /// Seeds the same way readiness seeds its window: healthy until a probe says
 /// otherwise, so the first attempt is not read as a failure.
-pub fn initialize_yellowstone_probe() {
-    metrics::counter!("microscope_yellowstone_probe_failures_total").increment(0);
-    set_yellowstone_probe_healthy(true);
+pub fn initialize_yellowstone_probe(endpoint: &str) {
+    metrics::counter!("microscope_yellowstone_probe_failures_total", "endpoint" => endpoint.to_string())
+        .increment(0);
+    set_yellowstone_probe_healthy(endpoint, true);
 }
 
-pub fn record_yellowstone_probe_failure() {
-    metrics::counter!("microscope_yellowstone_probe_failures_total").increment(1);
-    set_yellowstone_probe_healthy(false);
+pub fn record_yellowstone_probe_failure(endpoint: &str) {
+    metrics::counter!("microscope_yellowstone_probe_failures_total", "endpoint" => endpoint.to_string())
+        .increment(1);
+    set_yellowstone_probe_healthy(endpoint, false);
 }
 
 /// A rejected token or an unreachable endpoint leaves the process healthy and
 /// consuming nothing, so the endpoint's own reachability has to be a state an
 /// alert can read rather than an event in the logs.
-pub fn set_yellowstone_probe_healthy(healthy: bool) {
-    metrics::gauge!("microscope_yellowstone_probe_healthy").set(if healthy { 1.0 } else { 0.0 });
+pub fn set_yellowstone_probe_healthy(endpoint: &str, healthy: bool) {
+    metrics::gauge!("microscope_yellowstone_probe_healthy", "endpoint" => endpoint.to_string())
+        .set(if healthy { 1.0 } else { 0.0 });
+}
+
+/// A switch resubscribes at the new endpoint's live head, so it leaves a gap
+/// the disconnect counter never sees.
+pub fn initialize_yellowstone_failovers() {
+    metrics::counter!("microscope_yellowstone_failovers_total").increment(0);
+}
+
+pub fn record_yellowstone_failover() {
+    metrics::counter!("microscope_yellowstone_failovers_total").increment(1);
+}
+
+pub fn set_yellowstone_active_endpoint(endpoints: &[String], active: usize) {
+    set_active_endpoint("microscope_yellowstone_active_endpoint", endpoints, active);
+}
+
+fn set_active_endpoint(metric: &'static str, endpoints: &[String], active: usize) {
+    for (index, endpoint) in endpoints.iter().enumerate() {
+        let role = if index == 0 { "primary" } else { "fallback" };
+        metrics::gauge!(metric, "endpoint" => endpoint.clone(), "role" => role)
+            .set(if index == active { 1.0 } else { 0.0 });
+    }
+}
+
+pub fn initialize_rpc_failovers() {
+    metrics::counter!("microscope_rpc_failovers_total").increment(0);
+}
+
+pub fn record_rpc_failover() {
+    metrics::counter!("microscope_rpc_failovers_total").increment(1);
+}
+
+pub fn set_rpc_active_endpoint(endpoints: &[String], active: usize) {
+    set_active_endpoint("microscope_rpc_active_endpoint", endpoints, active);
+}
+
+/// A fallback that never worked is otherwise invisible until the failover
+/// that needs it.
+pub fn set_rpc_endpoint_healthy(endpoint: &str, healthy: bool) {
+    metrics::gauge!("microscope_rpc_endpoint_healthy", "endpoint" => endpoint.to_string())
+        .set(if healthy { 1.0 } else { 0.0 });
 }
 
 /// Seeds every counter the polling panels chart. Unseeded, a metric that never
@@ -217,7 +290,48 @@ pub fn unix_now() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use std::net::SocketAddr;
+
     use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+
+    use super::{bind_addr, DEFAULT_METRICS_ADDR, METRICS_ADDR_VAR};
+
+    #[test]
+    fn an_unset_or_empty_bind_address_falls_back_to_the_default() {
+        let all_interfaces = SocketAddr::from(([0, 0, 0, 0], 9090));
+
+        assert_eq!(
+            bind_addr(METRICS_ADDR_VAR, None, DEFAULT_METRICS_ADDR),
+            Ok(all_interfaces)
+        );
+        assert_eq!(
+            bind_addr(METRICS_ADDR_VAR, Some(""), DEFAULT_METRICS_ADDR),
+            Ok(all_interfaces)
+        );
+    }
+
+    #[test]
+    fn a_configured_bind_address_replaces_the_default() {
+        assert_eq!(
+            bind_addr(
+                METRICS_ADDR_VAR,
+                Some("127.0.0.1:9100"),
+                DEFAULT_METRICS_ADDR
+            ),
+            Ok(SocketAddr::from(([127, 0, 0, 1], 9100)))
+        );
+    }
+
+    #[test]
+    fn a_bind_address_that_does_not_parse_is_an_error_naming_the_variable() {
+        for value in ["nope", "127.0.0.1", "localhost:9090"] {
+            let error = bind_addr(METRICS_ADDR_VAR, Some(value), DEFAULT_METRICS_ADDR).unwrap_err();
+            assert!(
+                error.contains("MICROSCOPE_METRICS_ADDR"),
+                "{value}: {error}"
+            );
+        }
+    }
 
     /// The panels chart these directly, with no `vector(0)` fallback left to
     /// cover an unseeded counter.
