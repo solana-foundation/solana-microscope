@@ -100,6 +100,54 @@ impl fmt::Display for AlertChannel {
     }
 }
 
+/// Who a Slack notification tags: one member by user ID, or everyone in the
+/// channel the webhook posts to.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[serde(try_from = "String")]
+pub enum SlackMention {
+    Here,
+    Channel,
+    User(String),
+}
+
+impl SlackMention {
+    /// Unique per mention and short enough that a contact point named after
+    /// it stays within Grafana's 40-character UID limit. Lowercase like every
+    /// other generated UID, so the exporter's sorted file lists compare.
+    pub fn name(&self) -> String {
+        match self {
+            Self::Here => "here".to_string(),
+            Self::Channel => "channel".to_string(),
+            Self::User(id) => id.to_ascii_lowercase(),
+        }
+    }
+}
+
+impl TryFrom<String> for SlackMention {
+    type Error = String;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        match value.as_str() {
+            "@here" => Ok(Self::Here),
+            "@channel" => Ok(Self::Channel),
+            id if is_slack_user_id(id) => Ok(Self::User(value)),
+            _ => Err(format!(
+                "invalid slack mention {value:?}: expected a Slack user ID such as \
+                 U0123ABCDEF, \"@here\" or \"@channel\""
+            )),
+        }
+    }
+}
+
+/// The upper bound keeps `microscope-slack-<id>` within Grafana's UID limit.
+fn is_slack_user_id(id: &str) -> bool {
+    (9..=23).contains(&id.len())
+        && id.starts_with(['U', 'W'])
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AlertMatch {
@@ -198,6 +246,8 @@ pub struct AlertRule {
     pub evaluation_interval_seconds: Option<u64>,
     #[serde(default)]
     pub program_id: Option<String>,
+    #[serde(default)]
+    pub slack_mention: Option<SlackMention>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -222,6 +272,7 @@ pub struct AlertingConfig {
     /// to stay alerting long enough to be noticed rather than resolving between
     /// instructions.
     pub multisig_unmatched_window_seconds: u64,
+    pub health_slack_mention: Option<SlackMention>,
 }
 
 impl Default for AlertingConfig {
@@ -233,6 +284,7 @@ impl Default for AlertingConfig {
             rpc_poll_sustained_failure_seconds: 45,
             health_pending_period_seconds: 300,
             multisig_unmatched_window_seconds: 3600,
+            health_slack_mention: None,
         }
     }
 }
@@ -545,6 +597,17 @@ impl Config {
         if self.alerting.multisig_unmatched_window_seconds == 0 {
             bail!("alerting.multisig_unmatched_window_seconds must be greater than zero");
         }
+        if self.alerting.health_slack_mention.is_some()
+            && !self
+                .alert_rules
+                .iter()
+                .any(|alert| alert.channels.contains(&AlertChannel::Slack))
+        {
+            bail!(
+                "alerting.health_slack_mention is set but no alert uses the slack channel, \
+                 so no health alert notifies Slack"
+            );
+        }
 
         validate_dashboard_fields("event_fields", &self.dashboard.event_fields)?;
         validate_dashboard_fields("multisig_fields", &self.dashboard.multisig_fields)?;
@@ -683,6 +746,9 @@ impl AlertRule {
                 bail!("duplicate channel {channel}");
             }
         }
+        if self.slack_mention.is_some() && !unique_channels.contains(&AlertChannel::Slack) {
+            bail!("slack_mention is set but channels does not include slack");
+        }
         for (index, condition) in self.conditions.iter().enumerate() {
             condition
                 .validate()
@@ -812,7 +878,7 @@ mod tests {
     use super::{
         AlertChannel, AlertCondition, AlertConditionOperator, AlertConditionValue, AlertKind,
         AlertMatch, AlertRule, AlertSeverity, AlertingConfig, Config, DatasourceConfig,
-        DatasourceMode, MultisigConfig, MultisigVersion, ProgramConfig,
+        DatasourceMode, MultisigConfig, MultisigVersion, ProgramConfig, SlackMention,
     };
 
     const IDL: &str = "tests/fixtures/idl.json";
@@ -1060,6 +1126,7 @@ multisig_address = "11111111111111111111111111111111""#
             lookback_window_seconds: None,
             evaluation_interval_seconds: None,
             program_id: None,
+            slack_mention: None,
         }
     }
 
@@ -1356,6 +1423,80 @@ replay_window_slots = 900"#,
             .validate(Path::new("microscope.toml"))
             .expect_err("duplicate channels must be rejected");
         assert!(format!("{error:#}").contains("duplicate channel slack"));
+    }
+
+    fn mention(raw: &str) -> Result<SlackMention, toml::de::Error> {
+        toml::from_str::<AlertRule>(&format!(
+            "name = \"created\"\nseverity = \"warning\"\nchannels = [\"slack\"]\n\
+             slack_mention = {raw:?}"
+        ))
+        .map(|alert| alert.slack_mention.unwrap())
+    }
+
+    #[test]
+    fn parses_slack_mentions_the_way_slack_writes_them() {
+        assert_eq!(mention("@here").unwrap(), SlackMention::Here);
+        assert_eq!(mention("@channel").unwrap(), SlackMention::Channel);
+        assert_eq!(
+            mention("U0123ABCDEF").unwrap(),
+            SlackMention::User("U0123ABCDEF".to_string())
+        );
+        assert_eq!(
+            mention("W0123ABCD").unwrap(),
+            SlackMention::User("W0123ABCD".to_string())
+        );
+        for invalid in [
+            "here",
+            "channel",
+            "@U0123ABCDEF",
+            "<@U0123ABCDEF>",
+            "u0123abcdef",
+            "U095",
+            "S0123ABCDE",
+            "U0123456789ABCDEFGHIJKLMN",
+        ] {
+            let error = mention(invalid).expect_err(invalid).to_string();
+            assert!(
+                error.contains("expected a Slack user ID"),
+                "{invalid}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_a_slack_mention_on_an_alert_that_does_not_notify_slack() {
+        let valid = "11111111111111111111111111111111";
+        let mut config = config(valid, valid, "Cargo.toml");
+        config.alert_rules.push(AlertRule {
+            channels: vec![AlertChannel::Telegram],
+            slack_mention: Some(SlackMention::Here),
+            ..alert(AlertKind::Event, "record_created_event")
+        });
+
+        let error = config
+            .validate(Path::new("microscope.toml"))
+            .expect_err("a mention Slack never sends must be rejected");
+        assert!(format!("{error:#}").contains("channels does not include slack"));
+    }
+
+    #[test]
+    fn rejects_a_health_slack_mention_when_no_alert_notifies_slack() {
+        let valid = "11111111111111111111111111111111";
+        let mut config = config(valid, valid, IDL);
+        config.alerting.health_slack_mention = Some(SlackMention::Here);
+        config.alert_rules.push(AlertRule {
+            channels: vec![AlertChannel::Telegram],
+            ..alert(AlertKind::Event, "record_created_event")
+        });
+        let error = config
+            .validate(Path::new("microscope.toml"))
+            .expect_err("health alerts only notify the channels alerts use");
+        assert!(format!("{error:#}").contains("no alert uses the slack channel"));
+
+        config.alert_rules[0].channels = vec![AlertChannel::Slack];
+        config
+            .validate(Path::new("microscope.toml"))
+            .expect("a Slack alert gives health alerts a Slack contact point");
     }
 
     #[test]

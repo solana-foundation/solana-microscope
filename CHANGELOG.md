@@ -8,6 +8,16 @@ version and the section heading below.
 
 ## [Unreleased]
 
+### Added
+
+- Slack alerts can tag someone. Set `slack_mention` on an `[[alerts]]` entry to
+  a Slack user ID, `"@here"` or `"@channel"`, and
+  `[alerting] health_slack_mention` to tag someone on every health alert. Each
+  distinct mention gets its own `microscope-slack-<mention>` contact point,
+  which Grafana Cloud exports as `<deployment>-slack-<mention>`. Rule UIDs do
+  not change. In Terraform, set `slack_mention` on an `alerts` object and
+  `health_slack_mention` in `alerting`.
+
 ## [0.2.0-rc.1] - 2026-11-24
 
 ### Added

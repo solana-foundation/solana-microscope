@@ -185,6 +185,8 @@ Alerts support:
 - Integer condition values above 2^53 are rejected because Loki compares
   numbers as float64; quote the value to compare it as an exact string
 - Global timing defaults with per-alert overrides; evaluation intervals use 10-second multiples
+- Slack mentions: `slack_mention` on an alert tags a Slack user ID, `@here` or
+  `@channel`; `[alerting] health_slack_mention` does the same for health alerts
 - Dot-separated JSON field paths
 - Multisig alerts fire on successful activity only; failed Squads instructions
   stay visible in the dashboard and metrics but never page. Event and
@@ -201,6 +203,29 @@ Event, instruction and multisig alerts notify Slack and Telegram once per
 match, with no "resolved" message when the match leaves the lookback window.
 Health alerts still send one when they recover. PagerDuty gets the resolved
 message for both, because it is what closes the incident.
+
+A Slack alert with `slack_mention` tags that person, or the channel for
+`@here` and `@channel`, so one deployment watching several programs can tag
+each program's owner on its own alerts:
+
+```toml
+[alerting]
+health_slack_mention = "@here"
+
+[[alerts]]
+kind = "instruction"
+name = "set_authority"
+program_id = "TACLkU6CiCdkQN2MjoyDkVg2yAH9zkxiHDsiztQ52TP"
+severity = "critical"
+channels = ["slack"]
+slack_mention = "U0456GHIJKL"
+```
+
+A Slack contact point tags the same people on every message, so each distinct
+mention gets its own contact point, `microscope-slack-<mention>`, with the user
+ID lowercased. The mention applies to Slack only; the alert's other channels
+are unchanged. A user ID is the member ID from the person's Slack profile, not
+their display name.
 
 Telegram gets a compact message for each alert:
 
@@ -698,7 +723,8 @@ Contact-point JSON keeps `$SLACK_WEBHOOK_URL`-style placeholders; substitute
 real secrets only at push time, never in the committed files. Slack and
 Telegram export two contact points each: `<deployment>-<channel>` for health
 alerts and `<deployment>-<channel>-activity`, which sends no resolved message,
-for activity alerts. The Telegram contact points carry the message template in
+for activity alerts. Each distinct Slack mention adds a
+`<deployment>-slack-<mention>` activity contact point. The Telegram contact points carry the message template in
 `settings.message`, so push them again after an upgrade that changes it.
 
 Pushing only creates and updates. Rules and contact points that disappear from

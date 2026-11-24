@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 use crate::{
     config::{
         AlertChannel, AlertCondition, AlertConditionOperator, AlertConditionValue, AlertKind,
-        AlertMatch, AlertRule, Config, DatasourceMode,
+        AlertMatch, AlertRule, Config, DatasourceMode, SlackMention,
     },
     dashboard, files,
 };
@@ -198,10 +198,35 @@ fn provisioning_document(
         }],
     })];
     for channel in channels {
-        contact_points.push(contact_point(config, *channel, false));
+        let health_mention = match channel {
+            AlertChannel::Slack => config.alerting.health_slack_mention.as_ref(),
+            _ => None,
+        };
+        contact_points.push(contact_point(
+            config,
+            *channel,
+            receiver(*channel, false),
+            false,
+            health_mention,
+        ));
         if activity_skips_resolve(*channel) {
-            contact_points.push(contact_point(config, *channel, true));
+            contact_points.push(contact_point(
+                config,
+                *channel,
+                receiver(*channel, true),
+                true,
+                None,
+            ));
         }
+    }
+    for mention in slack_mentions(config) {
+        contact_points.push(contact_point(
+            config,
+            AlertChannel::Slack,
+            slack_mention_receiver(mention),
+            true,
+            Some(mention),
+        ));
     }
 
     Ok(json!({
@@ -279,6 +304,28 @@ fn receiver(channel: AlertChannel, activity: bool) -> String {
     } else {
         format!("microscope-{channel}")
     }
+}
+
+/// A Slack contact point tags the same people on every message, so each
+/// distinct mention needs a contact point of its own.
+fn slack_mention_receiver(mention: &SlackMention) -> String {
+    format!("microscope-slack-{}", mention.name())
+}
+
+fn activity_receiver(alert: &AlertRule, channel: AlertChannel) -> String {
+    match (channel, &alert.slack_mention) {
+        (AlertChannel::Slack, Some(mention)) => slack_mention_receiver(mention),
+        _ => receiver(channel, true),
+    }
+}
+
+fn slack_mentions(config: &Config) -> BTreeSet<&SlackMention> {
+    config
+        .alert_rules
+        .iter()
+        .filter(|alert| alert.channels.contains(&AlertChannel::Slack))
+        .filter_map(|alert| alert.slack_mention.as_ref())
+        .collect()
 }
 
 fn rpc_recovery_degraded_rules(
@@ -824,7 +871,7 @@ fn grafana_rule(
         "isPaused": false,
     });
     if let Some(channel) = alert_channel {
-        rule["notification_settings"] = json!({ "receiver": receiver(channel, true) });
+        rule["notification_settings"] = json!({ "receiver": activity_receiver(alert, channel) });
     }
 
     Ok(rule)
@@ -1061,9 +1108,24 @@ fn telegram_message(config: &Config) -> String {
     .concat()
 }
 
-fn contact_point(config: &Config, channel: AlertChannel, activity: bool) -> Value {
+fn contact_point(
+    config: &Config,
+    channel: AlertChannel,
+    name: String,
+    activity: bool,
+    slack_mention: Option<&SlackMention>,
+) -> Value {
     let settings = match channel {
-        AlertChannel::Slack => json!({ "url": "$SLACK_WEBHOOK_URL" }),
+        AlertChannel::Slack => {
+            let mut settings = json!({ "url": "$SLACK_WEBHOOK_URL" });
+            match slack_mention {
+                Some(SlackMention::Here) => settings["mentionChannel"] = json!("here"),
+                Some(SlackMention::Channel) => settings["mentionChannel"] = json!("channel"),
+                Some(SlackMention::User(id)) => settings["mentionUsers"] = json!(id),
+                None => {}
+            }
+            settings
+        }
         AlertChannel::Telegram => json!({
             "bottoken": "$TELEGRAM_BOT_TOKEN",
             "chatid": "$TELEGRAM_CHAT_ID",
@@ -1077,7 +1139,6 @@ fn contact_point(config: &Config, channel: AlertChannel, activity: bool) -> Valu
         }),
     };
 
-    let name = receiver(channel, activity);
     json!({
         "orgId": 1,
         "name": name,
@@ -1121,7 +1182,7 @@ mod tests {
     use crate::config::{
         AlertChannel, AlertCondition, AlertConditionOperator, AlertConditionValue, AlertKind,
         AlertMatch, AlertRule, AlertSeverity, AlertingConfig, Config, DatasourceMode,
-        ProgramConfig,
+        ProgramConfig, SlackMention,
     };
 
     use super::{
@@ -1140,6 +1201,7 @@ mod tests {
             lookback_window_seconds: None,
             evaluation_interval_seconds: None,
             program_id: None,
+            slack_mention: None,
         }
     }
 
@@ -2042,6 +2104,157 @@ mod tests {
         assert_eq!(activity["uid"], "microscope-telegram-activity");
         assert_eq!(activity["type"], "telegram");
         assert_eq!(activity["settings"], telegram["settings"]);
+    }
+
+    fn mentioning(mut alert: AlertRule, mention: &str) -> AlertRule {
+        alert.slack_mention = Some(SlackMention::try_from(mention.to_string()).unwrap());
+        alert
+    }
+
+    fn contact_point<'a>(document: &'a serde_json::Value, name: &str) -> &'a serde_json::Value {
+        document["contactPoints"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|contact_point| contact_point["name"] == name)
+            .unwrap_or_else(|| panic!("no contact point {name}"))
+    }
+
+    /// A Slack contact point tags the same people on every message, so an
+    /// alert tagging its owner needs a contact point no other owner shares.
+    #[test]
+    fn routes_slack_alerts_to_a_contact_point_that_tags_their_mention() {
+        let owner = mentioning(
+            alert_with_channel(AlertKind::Instruction, "set_authority", AlertChannel::Slack),
+            "U0123ABCDEF",
+        );
+        let same_owner = mentioning(
+            alert_with_channel(AlertKind::Instruction, "delete_plan", AlertChannel::Slack),
+            "U0123ABCDEF",
+        );
+        let everyone = mentioning(
+            alert_with_channel(AlertKind::Multisig, "proposal_created", AlertChannel::Slack),
+            "@here",
+        );
+        let untagged = alert_with_channel(AlertKind::Event, "created", AlertChannel::Slack);
+        let config = config(vec![owner, same_owner, everyone, untagged]);
+        let channels = BTreeSet::from([AlertChannel::Slack]);
+        let document = provisioning_document(&config, &channels, false).unwrap();
+
+        let receivers = rules(&document)
+            .filter(|rule| rule["labels"]["signal_kind"] != "datasource")
+            .map(|rule| {
+                (
+                    rule["labels"]["signal_name"].as_str().unwrap(),
+                    rule["notification_settings"]["receiver"].as_str().unwrap(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            receivers,
+            BTreeMap::from([
+                ("created", "microscope-slack-activity"),
+                ("delete_plan", "microscope-slack-u0123abcdef"),
+                ("proposal_created", "microscope-slack-here"),
+                ("set_authority", "microscope-slack-u0123abcdef"),
+            ])
+        );
+
+        let owner_point = contact_point(&document, "microscope-slack-u0123abcdef");
+        assert_eq!(
+            owner_point["receivers"][0]["settings"],
+            serde_json::json!({ "url": "$SLACK_WEBHOOK_URL", "mentionUsers": "U0123ABCDEF" })
+        );
+        assert_eq!(owner_point["receivers"][0]["disableResolveMessage"], true);
+        assert_eq!(
+            contact_point(&document, "microscope-slack-here")["receivers"][0]["settings"]
+                ["mentionChannel"],
+            "here"
+        );
+        assert_eq!(
+            contact_point(&document, "microscope-slack-activity")["receivers"][0]["settings"],
+            serde_json::json!({ "url": "$SLACK_WEBHOOK_URL" })
+        );
+        let mention_points = document["contactPoints"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|contact_point| {
+                contact_point["receivers"][0]["settings"]
+                    .as_object()
+                    .unwrap()
+                    .keys()
+                    .any(|key| key.starts_with("mention"))
+            })
+            .count();
+        assert_eq!(mention_points, 2);
+    }
+
+    #[test]
+    fn a_slack_mention_leaves_the_alerts_other_channels_untagged() {
+        let mut alert = mentioning(
+            alert_with_channel(AlertKind::Event, "created", AlertChannel::Slack),
+            "U0123ABCDEF",
+        );
+        alert.channels.push(AlertChannel::Telegram);
+        let config = config(vec![alert]);
+
+        let telegram = grafana_rule(
+            &config,
+            &config.alert_rules[0],
+            Some(AlertChannel::Telegram),
+        )
+        .unwrap();
+        assert_eq!(
+            telegram["notification_settings"]["receiver"],
+            "microscope-telegram-activity"
+        );
+    }
+
+    /// Moving an alert to another contact point must not replace its UID, or a
+    /// Grafana Cloud export leaves the old rule firing.
+    #[test]
+    fn a_slack_mention_keeps_the_rule_uid() {
+        let untagged = alert_with_channel(AlertKind::Event, "created", AlertChannel::Slack);
+        let tagged = mentioning(
+            alert_with_channel(AlertKind::Event, "created", AlertChannel::Slack),
+            "@channel",
+        );
+        let uid = |alert: &AlertRule| {
+            grafana_rule(&config(vec![]), alert, Some(AlertChannel::Slack)).unwrap()["uid"].clone()
+        };
+        assert_eq!(uid(&untagged), uid(&tagged));
+    }
+
+    #[test]
+    fn health_alerts_tag_the_health_mention_on_slack_only() {
+        let mut config = config(vec![alert_with_channel(
+            AlertKind::Event,
+            "created",
+            AlertChannel::Slack,
+        )]);
+        config.alerting.health_slack_mention = Some(SlackMention::Here);
+        let channels = BTreeSet::from([AlertChannel::Slack, AlertChannel::Telegram]);
+        let document = provisioning_document(&config, &channels, false).unwrap();
+
+        assert_eq!(
+            contact_point(&document, "microscope-slack")["receivers"][0]["settings"],
+            serde_json::json!({ "url": "$SLACK_WEBHOOK_URL", "mentionChannel": "here" })
+        );
+        assert!(
+            contact_point(&document, "microscope-slack-activity")["receivers"][0]["settings"]
+                .get("mentionChannel")
+                .is_none()
+        );
+        assert!(
+            contact_point(&document, "microscope-telegram")["receivers"][0]["settings"]
+                .get("mentionChannel")
+                .is_none()
+        );
+        assert!(rules(&document)
+            .filter(|rule| rule["labels"]["signal_kind"] == "datasource"
+                && rule["labels"]["channel"] == "slack")
+            .all(|rule| rule["notification_settings"]["receiver"] == "microscope-slack"));
     }
 
     fn contact_point_settings(channel: AlertChannel, name: &str) -> serde_json::Value {

@@ -134,6 +134,11 @@ Terraform cannot check
 this; a wrong name applies cleanly and then fails the reconcile on the VM.
 Check `bootstrap_log` when a revision does not apply.
 
+A Slack alert can tag someone: set `slack_mention` to a Slack user ID such as
+`U0123ABCDEF`, or to `@here` or `@channel`. `alerting.health_slack_mention`
+does the same for every generated health alert. Both are validated by
+Terraform, and a `slack_mention` requires `slack` in the alert's `channels`.
+
 ```hcl
 alerting = {
   lookback_window_seconds      = 60
@@ -142,6 +147,8 @@ alerting = {
   rpc_poll_sustained_failure_seconds = 45
   health_pending_period_seconds      = 300
   multisig_unmatched_window_seconds  = 3600
+  # Tag the whole channel on health alerts sent to Slack.
+  health_slack_mention = "@here"
 }
 
 alerts = [
@@ -153,8 +160,9 @@ alerts = [
       { field = "data.amount", operator = "gt", value = 0 },
       { field = "failed", operator = "eq", value = false },
     ]
-    severity = "warning"
-    channels = ["slack"]
+    severity      = "warning"
+    channels      = ["slack"]
+    slack_mention = "U0123ABCDEF"
   },
   {
     kind                        = "multisig"

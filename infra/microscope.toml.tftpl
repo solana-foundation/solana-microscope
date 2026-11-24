@@ -52,6 +52,9 @@ health_pending_period_seconds = ${alerting.health_pending_period_seconds}
 %{ if alerting.multisig_unmatched_window_seconds != null ~}
 multisig_unmatched_window_seconds = ${alerting.multisig_unmatched_window_seconds}
 %{ endif ~}
+%{ if alerting.health_slack_mention != null ~}
+health_slack_mention = ${jsonencode(alerting.health_slack_mention)}
+%{ endif ~}
 %{ for alert in alerts ~}
 
 [[alerts]]
@@ -73,5 +76,8 @@ evaluation_interval_seconds = ${alert.evaluation_interval_seconds}
 %{ endif ~}
 %{ if alert.program_id != null ~}
 program_id = ${jsonencode(alert.program_id)}
+%{ endif ~}
+%{ if alert.slack_mention != null ~}
+slack_mention = ${jsonencode(alert.slack_mention)}
 %{ endif ~}
 %{ endfor ~}

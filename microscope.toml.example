@@ -43,6 +43,9 @@ evaluation_interval_seconds = 10
 # How long Squads activity matching another multisig keeps alerting, which has
 # to outlast the hours a proposal takes to be approved.
 # multisig_unmatched_window_seconds = 3600
+# Tag someone on every health alert sent to Slack: a Slack user ID such as
+# U0123ABCDEF, "@here" or "@channel".
+# health_slack_mention = "@here"
 # Notifications link the matched transaction here. Append ?cluster=devnet for
 # devnet deployments, or point it at another explorer.
 explorer_transaction_url = "https://explorer.solana.com/tx/{signature}"
@@ -62,6 +65,9 @@ channels = []
 # Optional per-alert overrides:
 # lookback_window_seconds = 300
 # evaluation_interval_seconds = 30
+# Tag someone when this alert notifies Slack (requires "slack" in channels):
+# a Slack user ID such as U0123ABCDEF, "@here" or "@channel".
+# slack_mention = "U0123ABCDEF"
 
 # Other supported signals:
 # [[alerts]]

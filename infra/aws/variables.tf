@@ -318,6 +318,7 @@ variable "alerting" {
     rpc_poll_sustained_failure_seconds = optional(number)
     health_pending_period_seconds      = optional(number)
     multisig_unmatched_window_seconds  = optional(number)
+    health_slack_mention               = optional(string)
   })
   default = {}
 
@@ -334,6 +335,11 @@ variable "alerting" {
     )
     error_message = "alerting timings must be positive, evaluation_interval_seconds must be a multiple of 10, lookback_window_seconds must be at least evaluation_interval_seconds, and rpc_poll_sustained_failure_seconds must be between 1 and 900."
   }
+
+  validation {
+    condition     = can(regex("^(@here|@channel|[UW][A-Z0-9]{8,22})$", coalesce(var.alerting.health_slack_mention, "@here")))
+    error_message = "alerting.health_slack_mention must be a Slack user ID such as U0123ABCDEF, \"@here\" or \"@channel\"."
+  }
 }
 
 variable "alerts" {
@@ -348,6 +354,7 @@ variable "alerts" {
     lookback_window_seconds     = optional(number)
     evaluation_interval_seconds = optional(number)
     program_id                  = optional(string)
+    slack_mention               = optional(string)
   }))
   default = []
 
@@ -379,6 +386,17 @@ variable "alerts" {
       coalesce(alert.evaluation_interval_seconds, 10) % 10 == 0
     ])
     error_message = "alerts must use supported kinds, all/any matching, typed conditions, severities, channels, positive timing overrides, and evaluation intervals that are multiples of 10."
+  }
+
+  validation {
+    condition = alltrue([
+      for alert in var.alerts :
+      alert.slack_mention == null || (
+        can(regex("^(@here|@channel|[UW][A-Z0-9]{8,22})$", alert.slack_mention)) &&
+        contains(alert.channels, "slack")
+      )
+    ])
+    error_message = "alerts slack_mention must be a Slack user ID such as U0123ABCDEF, \"@here\" or \"@channel\", on an alert whose channels include slack."
   }
 }
 
