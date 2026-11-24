@@ -348,7 +348,7 @@ variable "alerting" {
   }
 
   validation {
-    condition     = can(regex("^(@here|@channel|[UW][A-Z0-9]{8,22})$", coalesce(var.alerting.health_slack_mention, "@here")))
+    condition     = var.alerting.health_slack_mention == null || can(regex("^(@here|@channel|[UW][A-Z0-9]{8,22})$", var.alerting.health_slack_mention))
     error_message = "alerting.health_slack_mention must be a Slack user ID such as U0123ABCDEF, \"@here\" or \"@channel\"."
   }
 }

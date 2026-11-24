@@ -81,3 +81,28 @@ run "rejects_a_malformed_health_slack_mention" {
 
   expect_failures = [var.alerting]
 }
+
+run "rejects_an_empty_health_slack_mention" {
+  command = plan
+
+  variables {
+    program_id = "De1egAFMkMWZSN5rYXRj9CAdheBamobVNubTsi9avR44"
+    alerting   = { health_slack_mention = "" }
+  }
+
+  expect_failures = [var.alerting]
+}
+
+run "rejects_a_health_slack_mention_without_a_slack_alert" {
+  command = plan
+
+  variables {
+    program_id = "De1egAFMkMWZSN5rYXRj9CAdheBamobVNubTsi9avR44"
+    alerting   = { health_slack_mention = "@here" }
+    alerts = [
+      { kind = "instruction", name = "subscribe", severity = "info", channels = [] },
+    ]
+  }
+
+  expect_failures = [aws_instance.this]
+}

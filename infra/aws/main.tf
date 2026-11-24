@@ -391,6 +391,10 @@ resource "aws_instance" "this" {
       ])
       error_message = "An alert's program_id must name a configured program, and applies to event and instruction alerts only."
     }
+    precondition {
+      condition     = var.alerting.health_slack_mention == null || contains(local.alert_channels, "slack")
+      error_message = "alerting.health_slack_mention requires an alert whose channels include slack, because health alerts notify only the channels alerts use."
+    }
   }
 
   depends_on = [
