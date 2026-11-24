@@ -1,6 +1,6 @@
 [package]
 name = "microscope-indexer"
-version = "0.1.0"
+version = "0.2.0-rc.1"
 edition.workspace = true
 description = "Self-hosted monitoring and alerting for Solana programs"
 license.workspace = true

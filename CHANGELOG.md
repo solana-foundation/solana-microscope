@@ -8,6 +8,8 @@ version and the section heading below.
 
 ## [Unreleased]
 
+## [0.2.0-rc.1] - 2026-11-24
+
 ### Added
 
 - One deployment can monitor several programs. Write one `[[programs]]` table
@@ -123,5 +125,6 @@ Initial public release.
   each deploying the stack into the operator's own account.
 - Operations guide in [`docs/operations.md`](docs/operations.md).
 
-[Unreleased]: https://github.com/solana-foundation/solana-microscope/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/solana-foundation/solana-microscope/compare/v0.2.0-rc.1...HEAD
+[0.2.0-rc.1]: https://github.com/solana-foundation/solana-microscope/compare/v0.1.0...v0.2.0-rc.1
 [0.1.0]: https://github.com/solana-foundation/solana-microscope/releases/tag/v0.1.0
