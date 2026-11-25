@@ -83,4 +83,7 @@ program_id = ${jsonencode(alert.program_id)}
 %{ if alert.slack_mention != null ~}
 slack_mention = ${jsonencode(alert.slack_mention)}
 %{ endif ~}
+%{ if length(alert.label_fields) > 0 ~}
+label_fields = ${jsonencode(alert.label_fields)}
+%{ endif ~}
 %{ endfor ~}

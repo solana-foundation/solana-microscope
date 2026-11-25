@@ -23,6 +23,7 @@ Build them from the IDL's field types.
 - `exists` means present and non-empty: `null` and `""` do not match. Use it only for Option-typed fields where a non-empty value is the signal.
 - Integer condition values above 2^53 are rejected (Loki compares numbers as float64); quote large thresholds as strings to compare exactly.
 - `match` is `all` or `any`.
+- `label_fields`: up to five field paths whose values the message should show, such as the IDL field that names what changed. Each becomes a label with dots turned into underscores; names the alert already uses (`signature`, `program_id`, ...) and log stream labels (`env`, `deployment`, ...) are rejected.
 - Timing overrides: `evaluation_interval_seconds` must be a multiple of 10, and `lookback_window_seconds` at least the interval.
 
 ## Dashboard fields

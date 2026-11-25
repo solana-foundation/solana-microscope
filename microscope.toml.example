@@ -72,6 +72,9 @@ channels = []
 # Tag someone when this alert notifies Slack (requires "slack" in channels):
 # a Slack user ID such as U0123ABCDEF, "@here" or "@channel".
 # slack_mention = "U0123ABCDEF"
+# Show record fields in the alert's message, at most five JSON paths. Each one
+# becomes an alert label, with dots turned into underscores (data_amount).
+# label_fields = ["data.amount"]
 
 # Other supported signals:
 # [[alerts]]

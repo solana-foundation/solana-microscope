@@ -187,6 +187,8 @@ Alerts support:
 - Global timing defaults with per-alert overrides; evaluation intervals use 10-second multiples
 - Slack mentions: `slack_mention` on an alert tags a Slack user ID, `@here` or
   `@channel`; `[alerting] health_slack_mention` does the same for health alerts
+- Record fields in messages: `label_fields` lists up to five JSON paths to show
+  in the alert
 - Dot-separated JSON field paths
 - Multisig alerts fire on successful activity only; failed Squads instructions
   stay visible in the dashboard and metrics but never page. Event and
@@ -227,6 +229,40 @@ ID lowercased. The mention applies to Slack only; the alert's other channels
 are unchanged. A user ID is the member ID from the person's Slack profile, not
 their display name.
 
+`label_fields` copies record fields into the alert, so the message says which
+record matched without a click to the dashboard:
+
+```toml
+[[alerts]]
+kind = "event"
+name = "group_cancelled"
+severity = "warning"
+channels = ["telegram"]
+label_fields = ["data.group", "data.refunded_total"]
+```
+
+Each path becomes a label of the alert, with dots turned into underscores:
+`data.group` is `data_group`, which a template of your own reads as
+`{{ $labels.data_group }}`. The `fields` annotation lists them all, as
+`data.group=<value> · data.refunded_total=<value>`; a record without the field
+shows `data.group=`. A path is rejected at startup when two paths become the
+same label, or when its label is one the alert already has (`signature`,
+`program_id`, `severity` and the like), a label of the log stream
+(`service_name`, `deployment`, `env`, `detected_level`), or a LogQL keyword
+(`on`, `by`, `offset` and the like).
+
+A transaction whose matching records differ in a field sends one alert for
+each value, grouped in one message; records with the same values still send
+one. With `match = "any"`, every condition extracts the same fields, so a
+record that matches several conditions still sends one alert. A path that
+names an object, such as `data`, puts its whole JSON in the label.
+
+The values come from the chain, so the sender of the transaction chooses
+them. Telegram escapes them. Slack's default message prints labels and
+annotations as they are, so a text field can carry Slack markup, such as a
+link or a `<!channel>` mention. For Slack, prefer fields with a fixed format,
+such as addresses, amounts and enum values.
+
 Telegram gets a compact message for each alert:
 
 ```text
@@ -240,7 +276,16 @@ the alert's panel in the Grafana dashboard; an alert with no dashboard panel,
 such as an instruction or health alert, links its `Rule` instead. A recovered
 health alert is one `✅ resolved: <signal>` line. When the deployment monitors
 several programs or several multisigs, a line under the description names the
-one that matched: `Program <program ID>` or `Vault <vault address>`.
+one that matched: `Program <program ID>` or `Vault <vault address>`. An alert
+with `label_fields` shows its `fields` annotation on a line under the
+description, cut at 300 characters; in a message of several alerts, the fields
+take the place of the description, in the same 100 characters.
+The fields are set as code, so Telegram does not turn a path such as
+`data.group`, or a value, into a link.
+When one transaction sends more than five alerts, Telegram lists the first
+five and the count; Slack lists them all. In a message of several alerts, the
+fields are cut at 100 characters in the order `label_fields` gives them, so put
+first the field that tells the alerts apart.
 
 Telegram limits a message to 4096 characters, so a message of event,
 instruction and multisig alerts shows at most five and counts the rest. A

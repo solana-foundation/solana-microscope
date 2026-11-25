@@ -10,8 +10,8 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     config::{
-        AlertChannel, AlertCondition, AlertConditionOperator, AlertConditionValue, AlertKind,
-        AlertMatch, AlertRule, Config, DatasourceMode, SlackMention,
+        label_name, AlertChannel, AlertCondition, AlertConditionOperator, AlertConditionValue,
+        AlertKind, AlertMatch, AlertRule, Config, DatasourceMode, SlackMention,
     },
     dashboard, files,
 };
@@ -898,6 +898,9 @@ fn grafana_rule(
     if names_matched_program {
         annotations["program_id"] = json!("{{ $labels.scope }}");
     }
+    if !alert.label_fields.is_empty() {
+        annotations["fields"] = json!(fields_annotation(&alert.label_fields));
+    }
     if let Some(panel_id) = log_panel_id(alert.kind) {
         annotations["__dashboardUid__"] = json!(dashboard::OVERVIEW_UID);
         annotations["__panelId__"] = json!(panel_id.to_string());
@@ -929,6 +932,14 @@ fn grafana_rule(
     }
 
     Ok(rule)
+}
+
+fn fields_annotation(fields: &[String]) -> String {
+    fields
+        .iter()
+        .map(|field| format!("{field}={{{{ $labels.{} }}}}", label_name(field)))
+        .collect::<Vec<_>>()
+        .join(" · ")
 }
 
 /// A rule covering one program has nothing to name, and grouping by scope
@@ -981,12 +992,12 @@ fn logql_query(config: &Config, alert: &AlertRule) -> anyhow::Result<String> {
     let quoted_name = serde_json::to_string(&alert.name)?;
     let scope_filter = dashboard::scope_filter(&scope_values);
 
-    let grouping = if alert.kind == AlertKind::Multisig
+    let mut grouping = if alert.kind == AlertKind::Multisig
         || names_matched_program(alert, &config.alert_program_ids(alert))
     {
-        "signature, scope"
+        "signature, scope".to_string()
     } else {
-        "signature"
+        "signature".to_string()
     };
     let mut parser = format!(
         "| json kind=\"kind\", signal=\"{signal_path}\", scope=\"{scope_path}\", signature=\"signature\""
@@ -996,6 +1007,11 @@ fn logql_query(config: &Config, alert: &AlertRule) -> anyhow::Result<String> {
     if alert.kind == AlertKind::Multisig {
         parser.push_str(", failed=\"failed\"");
         filters.push_str(" | failed = \"false\"");
+    }
+    for field in &alert.label_fields {
+        let label = label_name(field);
+        parser.push_str(&format!(", {label}=\"{field}\""));
+        grouping.push_str(&format!(", {label}"));
     }
     let lookback_window_seconds = alert.lookback_window_seconds(&config.alerting);
     let indexed_conditions = alert.conditions.iter().enumerate().collect::<Vec<_>>();
@@ -1111,8 +1127,10 @@ const TELEGRAM_GROUPED_HEALTH_DESCRIPTION_LIMIT: usize = 350;
 /// An alert's first line, and all that a health alert prints when more than five fire.
 const TELEGRAM_ALERT_TITLE: &str = r#"{{ if eq .Labels.severity "critical" }}🚨{{ else if eq .Labels.severity "error" }}🔴{{ else if eq .Labels.severity "warning" }}🟠{{ else }}🔵{{ end }} <b>{{ if eq .Labels.alertname "DatasourceError" }}DatasourceError: {{ end }}{{ or .Labels.signal_name .Labels.alertname | html | printf "%.64s" }}</b>{{ with .Labels.severity }} · {{ . | html | printf "%.16s" }}{{ end }}"#;
 
-const TELEGRAM_ALERT_DETAILS: &str = r#"{{ or .Annotations.Error .Annotations.description .Annotations.summary | html | printf "%.{limit}s" }}
-{matched}{{ if .Annotations.transaction_url }}<a href="{{ .Annotations.transaction_url | html }}">Transaction</a> · {{ end }}{{ if .PanelURL }}<a href="{{ .PanelURL | html }}">Dashboard</a>{{ else if .DashboardURL }}<a href="{{ .DashboardURL | html }}">Dashboard</a>{{ else if .GeneratorURL }}<a href="{{ .GeneratorURL | html }}">Rule</a>{{ end }}
+const TELEGRAM_SINGLE_FIELDS_LIMIT: usize = 300;
+
+const TELEGRAM_ALERT_DETAILS: &str = r#"{description}
+{fields}{matched}{{ if .Annotations.transaction_url }}<a href="{{ .Annotations.transaction_url | html }}">Transaction</a> · {{ end }}{{ if .PanelURL }}<a href="{{ .PanelURL | html }}">Dashboard</a>{{ else if .DashboardURL }}<a href="{{ .DashboardURL | html }}">Dashboard</a>{{ else if .GeneratorURL }}<a href="{{ .GeneratorURL | html }}">Rule</a>{{ end }}
 
 "#;
 
@@ -1137,16 +1155,59 @@ fn telegram_matched_line(config: &Config) -> String {
     line
 }
 
-fn telegram_alert(description_limit: usize, matched_line: &str) -> String {
+#[derive(Clone, Copy)]
+enum TelegramFields {
+    Hidden,
+    OwnLine,
+    InPlaceOfDescription,
+}
+
+fn telegram_alert(description_limit: usize, matched_line: &str, fields: TelegramFields) -> String {
+    let description = format!(
+        "{{{{ or .Annotations.Error .Annotations.description .Annotations.summary | html | printf \"%.{description_limit}s\" }}}}"
+    );
+    // Telegram turns text such as `data.group` into a link, but adds no link inside `code`.
+    let (description, fields_line) = match fields {
+        TelegramFields::Hidden => (description, String::new()),
+        TelegramFields::OwnLine => (
+            description,
+            format!(
+                "{{{{ with .Annotations.fields }}}}<code>{{{{ . | html | printf \"%.{TELEGRAM_SINGLE_FIELDS_LIMIT}s\" }}}}</code>\n{{{{ end }}}}"
+            ),
+        ),
+        TelegramFields::InPlaceOfDescription => (
+            format!(
+                "{{{{ if .Annotations.fields }}}}<code>{{{{ .Annotations.fields | html | printf \"%.{description_limit}s\" }}}}</code>{{{{ else }}}}{description}{{{{ end }}}}"
+            ),
+            String::new(),
+        ),
+    };
     let details = TELEGRAM_ALERT_DETAILS
-        .replace("{limit}", &description_limit.to_string())
+        .replace("{description}", &description)
+        .replace("{fields}", &fields_line)
         .replace("{matched}", matched_line);
     format!("{TELEGRAM_ALERT_TITLE}\n{details}")
 }
 
+fn telegram_shows_fields(config: &Config, activity: bool) -> bool {
+    activity
+        && config.alert_rules.iter().any(|alert| {
+            !alert.label_fields.is_empty() && alert.channels.contains(&AlertChannel::Telegram)
+        })
+}
+
 fn telegram_message(config: &Config, activity: bool) -> String {
     let matched_line = telegram_matched_line(config);
-    let single = telegram_alert(TELEGRAM_SINGLE_DESCRIPTION_LIMIT, &matched_line);
+    let shows_fields = telegram_shows_fields(config, activity);
+    let single = telegram_alert(
+        TELEGRAM_SINGLE_DESCRIPTION_LIMIT,
+        &matched_line,
+        if shows_fields {
+            TelegramFields::OwnLine
+        } else {
+            TelegramFields::Hidden
+        },
+    );
     let grouped = telegram_alert(
         if activity {
             TELEGRAM_GROUPED_ACTIVITY_DESCRIPTION_LIMIT
@@ -1154,6 +1215,11 @@ fn telegram_message(config: &Config, activity: bool) -> String {
             TELEGRAM_GROUPED_HEALTH_DESCRIPTION_LIMIT
         },
         &matched_line,
+        if shows_fields {
+            TelegramFields::InPlaceOfDescription
+        } else {
+            TelegramFields::Hidden
+        },
     );
     // A health alert is never hidden: above five, each one gets its title line.
     let above_five = if activity {
@@ -1285,6 +1351,7 @@ mod tests {
             evaluation_interval_seconds: None,
             program_id: None,
             slack_mention: None,
+            label_fields: vec![],
         }
     }
 
@@ -2022,6 +2089,130 @@ mod tests {
         assert!(query.contains(")) or sum by (signature) (count_over_time("));
     }
 
+    fn with_label_fields(mut alert: AlertRule, fields: &[&str]) -> AlertRule {
+        alert.label_fields = fields.iter().map(|field| field.to_string()).collect();
+        alert
+    }
+
+    fn exists(field: &str) -> AlertCondition {
+        AlertCondition {
+            field: field.to_string(),
+            operator: AlertConditionOperator::Exists,
+            value: None,
+        }
+    }
+
+    #[test]
+    fn label_fields_become_labels_of_the_matched_series() {
+        let rule = with_label_fields(
+            alert(AlertKind::Event, "created"),
+            &["data.group", "data.refunded_total"],
+        );
+
+        assert_eq!(
+            logql_query(&config(vec![]), &rule).unwrap(),
+            "(sum by (signature, data_group, data_refunded_total) (count_over_time(\
+             {service_name=\"microscope-indexer\"} | json kind=\"kind\", signal=\"name\", \
+             scope=\"program_id\", signature=\"signature\", data_group=\"data.group\", \
+             data_refunded_total=\"data.refunded_total\" | kind = \"program_event\" | \
+             signal = \"created\" | scope = \"11111111111111111111111111111111\" | \
+             __error__ = \"\" [60s])) or on() vector(0))"
+        );
+    }
+
+    #[test]
+    fn label_fields_follow_the_scope_of_multisig_and_multi_program_alerts() {
+        let multisig = with_label_fields(
+            alert(AlertKind::Multisig, "proposal_approved"),
+            &["instruction"],
+        );
+        let query = logql_query(&config(vec![]), &multisig).unwrap();
+        assert!(query.contains("sum by (signature, scope, instruction) (count_over_time("));
+        assert!(query.contains(", failed=\"failed\", instruction=\"instruction\" |"));
+
+        let event = with_label_fields(alert(AlertKind::Event, "created"), &["data.group"]);
+        let query = logql_query(&several_programs(), &event).unwrap();
+        assert!(query.contains("sum by (signature, scope, data_group) (count_over_time("));
+    }
+
+    /// `or` drops a series only when its labels equal one on its left, so a
+    /// branch without the fields would send a second alert for one record.
+    #[test]
+    fn every_any_branch_carries_the_same_label_fields() {
+        let mut rule = with_label_fields(
+            alert(AlertKind::Event, "created"),
+            &["data.group", "data.refunded_total"],
+        );
+        rule.match_mode = AlertMatch::Any;
+        rule.conditions = vec![
+            exists("data.memo"),
+            exists("data.authority"),
+            exists("data.reason"),
+        ];
+
+        let query = logql_query(&config(vec![]), &rule).unwrap();
+        let branches = query
+            .strip_prefix('(')
+            .unwrap()
+            .strip_suffix(" or on() vector(0))")
+            .unwrap()
+            .split(" or ")
+            .collect::<Vec<_>>();
+
+        assert_eq!(branches.len(), 3);
+        for (index, branch) in branches.iter().enumerate() {
+            assert!(
+                branch.starts_with(
+                    "sum by (signature, data_group, data_refunded_total) (count_over_time("
+                ),
+                "{branch}"
+            );
+            assert!(
+                branch.contains(&format!(
+                    "signature=\"signature\", data_group=\"data.group\", \
+                     data_refunded_total=\"data.refunded_total\", condition_{index}=\""
+                )),
+                "{branch}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_alert_without_label_fields_keeps_its_query() {
+        let mut rule = alert(AlertKind::Event, "created");
+        rule.match_mode = AlertMatch::Any;
+        rule.conditions = vec![exists("data.memo"), exists("data.authority")];
+
+        let query = logql_query(&config(vec![]), &rule).unwrap();
+        assert_eq!(
+            query
+                .matches("sum by (signature) (count_over_time(")
+                .count(),
+            2
+        );
+        assert!(query.contains("signature=\"signature\", condition_0=\"data.memo\" |"));
+    }
+
+    #[test]
+    fn label_fields_show_in_a_fields_annotation_and_keep_the_rule_uid() {
+        let plain = alert(AlertKind::Event, "created");
+        let labelled = with_label_fields(
+            alert(AlertKind::Event, "created"),
+            &["data.group", "data.refunded_total"],
+        );
+        let rule =
+            |alert| grafana_rule(&config(vec![]), alert, Some(AlertChannel::Telegram)).unwrap();
+
+        let plain = rule(&plain);
+        let labelled = rule(&labelled);
+        assert_eq!(labelled["uid"], plain["uid"]);
+        assert_eq!(
+            labelled["annotations"]["fields"],
+            "data.group={{ $labels.data_group }} · data.refunded_total={{ $labels.data_refunded_total }}"
+        );
+        assert!(plain["annotations"].get("fields").is_none());
+    }
+
     #[test]
     fn describes_exists_conditions_the_way_the_query_evaluates_them() {
         let mut rule = alert(AlertKind::Event, "created");
@@ -2391,7 +2582,14 @@ mod tests {
     }
 
     fn telegram_messages() -> Vec<String> {
-        let configs = [config(vec![]), several_programs_and_multisigs()];
+        let configs = [
+            config(vec![]),
+            several_programs_and_multisigs(),
+            config(vec![with_label_fields(
+                alert_with_channel(AlertKind::Event, "created", AlertChannel::Telegram),
+                &["data.group", "data.refunded_total"],
+            )]),
+        ];
         configs
             .iter()
             .flat_map(|config| [false, true].map(|activity| telegram_message(config, activity)))
@@ -2571,6 +2769,101 @@ mod tests {
         assert!(above_five
             .ends_with("{{ end }}… {{ len .Alerts.Firing }} alerts firing, first 5 shown\n"));
         assert!(above_five.contains(".Annotations.description"));
+    }
+
+    #[test]
+    fn telegram_shows_the_fields_on_their_own_line_or_in_place_of_a_grouped_description() {
+        let telegram = with_label_fields(
+            alert_with_channel(AlertKind::Event, "created", AlertChannel::Telegram),
+            &["data.group"],
+        );
+        let message = telegram_message(&config(vec![telegram]), true);
+        let (single, grouped) = message
+            .split_once("{{ else if gt (len .Alerts.Firing) 5 }}")
+            .unwrap();
+
+        assert_eq!(
+            single
+                .matches(
+                    "{{ with .Annotations.fields }}<code>{{ . | html | printf \"%.300s\" }}</code>\n{{ end }}"
+                )
+                .count(),
+            1
+        );
+        assert!(single.contains(
+            "{{ or .Annotations.Error .Annotations.description .Annotations.summary | html | printf \"%.3000s\" }}"
+        ));
+        assert_eq!(
+            grouped
+                .matches(
+                    "{{ if .Annotations.fields }}<code>{{ .Annotations.fields | html | printf \"%.100s\" }}</code>\
+                     {{ else }}{{ or .Annotations.Error .Annotations.description .Annotations.summary \
+                     | html | printf \"%.100s\" }}{{ end }}"
+                )
+                .count(),
+            2
+        );
+        assert!(!grouped.contains("with .Annotations.fields"));
+    }
+
+    /// Telegram links text such as `data.group` unless it is inside `code`.
+    #[test]
+    fn telegram_prints_the_fields_as_code() {
+        let mut printed_anywhere = 0;
+        for message in telegram_messages() {
+            let printed = message.matches(".Annotations.fields | html").count()
+                + message.matches("{{ with .Annotations.fields }}").count();
+            let as_code = message
+                .matches("<code>{{ .Annotations.fields | html")
+                .count()
+                + message
+                    .matches("{{ with .Annotations.fields }}<code>{{ . | html")
+                    .count();
+            assert_eq!(printed, as_code);
+            assert_eq!(
+                message.matches("<code>").count(),
+                message.matches("</code>").count()
+            );
+            printed_anywhere += printed;
+        }
+        assert!(printed_anywhere > 0);
+    }
+
+    #[test]
+    fn telegram_messages_change_only_for_activity_alerts_sent_there_with_fields() {
+        let unchanged = |config: &Config| {
+            for activity in [false, true] {
+                assert_eq!(
+                    telegram_message(config, activity),
+                    telegram_message(&config_without_label_fields(), activity)
+                );
+            }
+        };
+        unchanged(&config(vec![with_label_fields(
+            alert_with_channel(AlertKind::Event, "created", AlertChannel::Slack),
+            &["data.group"],
+        )]));
+
+        let telegram = config(vec![with_label_fields(
+            alert_with_channel(AlertKind::Event, "created", AlertChannel::Telegram),
+            &["data.group"],
+        )]);
+        assert_eq!(
+            telegram_message(&telegram, false),
+            telegram_message(&config_without_label_fields(), false)
+        );
+        assert_ne!(
+            telegram_message(&telegram, true),
+            telegram_message(&config_without_label_fields(), true)
+        );
+    }
+
+    fn config_without_label_fields() -> Config {
+        config(vec![alert_with_channel(
+            AlertKind::Event,
+            "created",
+            AlertChannel::Telegram,
+        )])
     }
 
     /// The health contact point's longer grouped description fits in 4096

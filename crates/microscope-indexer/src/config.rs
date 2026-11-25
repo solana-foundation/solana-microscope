@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     env, fmt,
     path::{Path, PathBuf},
     str::FromStr,
@@ -248,6 +248,93 @@ pub struct AlertRule {
     pub program_id: Option<String>,
     #[serde(default)]
     pub slack_mention: Option<SlackMention>,
+    #[serde(default)]
+    pub label_fields: Vec<String>,
+}
+
+pub const MAX_LABEL_FIELDS: usize = 5;
+
+/// Loki 3.7.3 lexes these as keywords in any case, so a label named one breaks the query.
+const LOGQL_KEYWORDS: &[&str] = &[
+    "and",
+    "bool",
+    "by",
+    "decolorize",
+    "drop",
+    "group_left",
+    "group_right",
+    "ignoring",
+    "json",
+    "keep",
+    "label_format",
+    "line_format",
+    "logfmt",
+    "of",
+    "offset",
+    "on",
+    "or",
+    "pattern",
+    "regexp",
+    "unless",
+    "unpack",
+    "unwrap",
+    "variants",
+    "without",
+];
+
+pub fn label_name(field: &str) -> String {
+    field.replace('.', "_")
+}
+
+fn why_label_is_reserved(name: &str) -> Option<&'static str> {
+    if name.starts_with("__") {
+        return Some("Grafana and Loki reserve");
+    }
+    if name
+        .strip_prefix("condition_")
+        .is_some_and(|index| !index.is_empty() && index.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        return Some("the alert query uses for a condition");
+    }
+    if LOGQL_KEYWORDS.contains(&name.to_ascii_lowercase().as_str()) {
+        return Some("LogQL reads as a keyword");
+    }
+    match name {
+        "kind" | "signal" | "scope" | "signature" | "failed" => {
+            Some("the alert query already extracts")
+        }
+        "channel" | "program_id" | "severity" | "signal_kind" | "signal_name" => {
+            Some("is already a label of the rule")
+        }
+        "alertname" | "grafana_folder" => Some("Grafana sets"),
+        // Loki renames a parsed label that shares a stream label's name, so
+        // the query would group by the stream's value instead of the record's.
+        "service_name" | "service" | "deployment" | "env" | "detected_level" => {
+            Some("is a log stream label")
+        }
+        _ => None,
+    }
+}
+
+fn validate_label_fields(fields: &[String]) -> anyhow::Result<()> {
+    if fields.len() > MAX_LABEL_FIELDS {
+        bail!(
+            "label_fields holds {} fields; at most {MAX_LABEL_FIELDS} are allowed",
+            fields.len()
+        );
+    }
+    let mut fields_by_label = BTreeMap::new();
+    for field in fields {
+        validate_field_path(field).context("invalid label_fields entry")?;
+        let label = label_name(field);
+        if let Some(reason) = why_label_is_reserved(&label) {
+            bail!("label_fields entry {field:?} becomes label {label}, which {reason}");
+        }
+        if let Some(previous) = fields_by_label.insert(label.clone(), field) {
+            bail!("label_fields entries {previous:?} and {field:?} both become label {label}");
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Deserialize)]
@@ -763,6 +850,7 @@ impl AlertRule {
                 );
             }
         }
+        validate_label_fields(&self.label_fields)?;
         validate_timing(
             self.lookback_window_seconds(defaults),
             self.evaluation_interval_seconds(defaults),
@@ -1130,6 +1218,7 @@ multisig_address = "11111111111111111111111111111111""#
             evaluation_interval_seconds: None,
             program_id: None,
             slack_mention: None,
+            label_fields: vec![],
         }
     }
 
@@ -1426,6 +1515,75 @@ replay_window_slots = 900"#,
             .validate(Path::new("microscope.toml"))
             .expect_err("duplicate channels must be rejected");
         assert!(format!("{error:#}").contains("duplicate channel slack"));
+    }
+
+    fn label_fields_error(fields: &[&str]) -> Option<String> {
+        let valid = "11111111111111111111111111111111";
+        let mut config = config(valid, valid, IDL);
+        config.alert_rules.push(AlertRule {
+            label_fields: fields.iter().map(|field| field.to_string()).collect(),
+            ..alert(AlertKind::Event, "record_created_event")
+        });
+        config
+            .validate(Path::new("microscope.toml"))
+            .err()
+            .map(|error| format!("{error:#}"))
+    }
+
+    #[test]
+    fn label_fields_may_name_any_record_field() {
+        assert_eq!(label_fields_error(&[]), None);
+        assert_eq!(
+            label_fields_error(&[
+                "data.group",
+                "data.refunded_total",
+                "instruction",
+                "condition_count",
+                "data.__hidden",
+            ]),
+            None
+        );
+        assert_eq!(label_fields_error(&["data.on", "group", "count"]), None);
+
+        let alert = toml::from_str::<AlertRule>(
+            "name = \"created\"\nseverity = \"warning\"\nlabel_fields = [\"data.group\"]",
+        )
+        .unwrap();
+        assert_eq!(alert.label_fields, ["data.group"]);
+        assert!(toml::from_str::<AlertRule>(
+            "name = \"created\"\nseverity = \"warning\"\nlabel_field = [\"data.group\"]"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn rejects_label_fields_that_cannot_become_a_label_of_their_own() {
+        for (fields, message) in [
+            (vec!["data..group"], "must be a dot-separated JSON path"),
+            (vec!["data.items[0]"], "must be a dot-separated JSON path"),
+            (vec!["a", "b", "c", "d", "e", "f"], "at most 5 are allowed"),
+            (
+                vec!["data.group", "data.group"],
+                "both become label data_group",
+            ),
+            (vec!["data.a_b", "data.a.b"], "both become label data_a_b"),
+            (vec!["signature"], "which the alert query already extracts"),
+            (
+                vec!["condition_0"],
+                "which the alert query uses for a condition",
+            ),
+            (vec!["program_id"], "which is already a label of the rule"),
+            (vec!["alertname"], "which Grafana sets"),
+            (vec!["__name__"], "which Grafana and Loki reserve"),
+            (vec!["env"], "which is a log stream label"),
+            (vec!["detected_level"], "which is a log stream label"),
+            (vec!["offset"], "which LogQL reads as a keyword"),
+            (vec!["On"], "which LogQL reads as a keyword"),
+        ] {
+            let error = label_fields_error(&fields)
+                .unwrap_or_else(|| panic!("{fields:?} must be rejected"));
+            assert!(error.contains(message), "{fields:?}: {error}");
+        }
     }
 
     fn mention(raw: &str) -> Result<SlackMention, toml::de::Error> {

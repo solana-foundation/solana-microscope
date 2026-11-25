@@ -59,6 +59,8 @@ sum by (signature) (count_over_time({service_name="microscope-indexer"}
 
 Multisig alerts group by `(signature, scope)`, and with several multisigs the scope filter is `scope =~ "<vault>|<vault>"`.
 
+An alert with `label_fields` also extracts each field (`data_group="data.group"`) and adds it to the grouping, in every OR branch. One transaction whose matching records differ in such a field fires one alert per value; the values are in the `fields` annotation, and a missing field is an empty label, not a dropped match.
+
 The causes, in the order they are worth checking:
 
 - **`__error__ = ""` dropped the record.** A numeric condition against a field that is a string, null, or absent makes Loki mark the line as a conversion error, and the filter removes it. This silently discards a record that otherwise matched. Query without the condition filters to see whether the record is there at all.

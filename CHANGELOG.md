@@ -10,6 +10,15 @@ version and the section heading below.
 
 ### Added
 
+- `label_fields` on an `[[alerts]]` entry shows record fields in the alert, for
+  example `label_fields = ["data.group", "data.refunded_total"]`. Each path
+  becomes an alert label (`data_group`), and a `fields` annotation lists them
+  as `data.group=<value> · …`. Slack and PagerDuty show both in their default
+  message; Telegram shows the fields under the description, or in place of it
+  when a message holds several alerts. A transaction whose matching records
+  differ in a field sends one alert per value. Rule UIDs do not change, and a
+  deployment without `label_fields` provisions the same rules and contact
+  points as before. In Terraform, set `label_fields` on an `alerts` object.
 - Slack alerts can tag someone. Set `slack_mention` on an `[[alerts]]` entry to
   a Slack user ID, `"@here"` or `"@channel"`, and
   `[alerting] health_slack_mention` to tag someone on every health alert. Each

@@ -367,6 +367,7 @@ variable "alerts" {
     evaluation_interval_seconds = optional(number)
     program_id                  = optional(string)
     slack_mention               = optional(string)
+    label_fields                = optional(list(string), [])
   }))
   default = []
 
@@ -409,6 +410,19 @@ variable "alerts" {
       )
     ])
     error_message = "alerts slack_mention must be a Slack user ID such as U0123ABCDEF, \"@here\" or \"@channel\", on an alert whose channels include slack."
+  }
+
+  validation {
+    condition = alltrue([
+      for alert in var.alerts :
+      length(alert.label_fields) <= 5 &&
+      alltrue([
+        for field in alert.label_fields :
+        can(regex("^[_A-Za-z][_0-9A-Za-z]*(\\.[_A-Za-z][_0-9A-Za-z]*)*$", field))
+      ]) &&
+      length(distinct([for field in alert.label_fields : replace(field, ".", "_")])) == length(alert.label_fields)
+    ])
+    error_message = "alerts label_fields must hold at most 5 dot-separated JSON paths of letters, numbers, and underscores, and no two of them may become the same label once dots become underscores."
   }
 }
 

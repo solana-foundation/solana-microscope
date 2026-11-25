@@ -139,6 +139,11 @@ A Slack alert can tag someone: set `slack_mention` to a Slack user ID such as
 does the same for every generated health alert. Both are validated by
 Terraform, and a `slack_mention` requires `slack` in the alert's `channels`.
 
+`label_fields` lists up to five record fields to show in an alert's message,
+such as `["data.group"]`. Terraform checks the paths and that no two of them
+become the same label. A path whose label the alert already has, such as
+`signature`, passes Terraform and then fails the reconcile on the VM.
+
 ```hcl
 alerting = {
   lookback_window_seconds      = 60
